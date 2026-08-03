@@ -15,6 +15,7 @@ const APP = {
         orders: [],
         items: []
     },
+    historyFilterDays: 1, // Default: 1 (Hôm nay), 7 (7 ngày), 0 (Tất cả)
     deleteTargetId: null,
     orderRowIndex: null,  // for GSheets row tracking
 };
@@ -161,6 +162,10 @@ async function gsFetch(action, payload = {}) {
             // GET request: Apps Script trả về JSON qua doGet, không bị CORS
             const url = new URL(APP.scriptUrl);
             url.searchParams.set('action', action);
+            // Truyền days param cho getHistory
+            if (action === 'getHistory' && payload.days !== undefined) {
+                url.searchParams.set('days', payload.days);
+            }
             const res = await fetch(url.toString(), { method: 'GET' });
             return await res.json();
         } else {
@@ -179,7 +184,24 @@ async function gsFetch(action, payload = {}) {
     }
 }
 
-async function loadMenuFromSheets() {
+async function loadMenuFromSheets(forceRefresh = false) {
+    // Check localStorage cache (valid for 15 minutes)
+    const CACHE_KEY = 'cafe_pos_menu_cache';
+    const CACHE_TS_KEY = 'cafe_pos_menu_ts';
+    const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+    if (!forceRefresh) {
+        const cached = localStorage.getItem(CACHE_KEY);
+        const ts = parseInt(localStorage.getItem(CACHE_TS_KEY) || '0');
+        if (cached && (Date.now() - ts) < CACHE_TTL) {
+            APP.menuItems = JSON.parse(cached);
+            renderMenuGrid(APP.menuItems);
+            renderMenuTable();
+            showToast(`Thực đơn sẵn sàng (${APP.menuItems.length} món) ⚡`, 'success');
+            return;
+        }
+    }
+
     try {
         showToast('Đang tải thực đơn...', 'info');
         const data = await gsFetch('getMenu');
@@ -188,6 +210,9 @@ async function loadMenuFromSheets() {
                 id: String(r[0]), name: String(r[1]), price: Number(r[2]), status: String(r[3]),
                 emoji: getEmoji(String(r[1])),
             }));
+            // Save to cache
+            localStorage.setItem(CACHE_KEY, JSON.stringify(APP.menuItems));
+            localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
         }
         renderMenuGrid(APP.menuItems);
         renderMenuTable();
@@ -700,6 +725,19 @@ function printReceipt() {
 // ============================================================
 // 13. HISTORY PAGE LOGIC
 // ============================================================
+function changeHistoryFilter(days) {
+    if (APP.historyFilterDays === days) return;
+    APP.historyFilterDays = days;
+
+    // Update active button state
+    document.getElementById('btnFilter1').classList.remove('active');
+    document.getElementById('btnFilter7').classList.remove('active');
+    document.getElementById('btnFilter0').classList.remove('active');
+    document.getElementById(`btnFilter${days}`).classList.add('active');
+
+    loadHistoryFromSheets();
+}
+
 async function loadHistoryFromSheets() {
     if (APP.demoMode) {
         showToast('Chế độ Demo: Không có dữ liệu lịch sử.', 'info');
@@ -713,7 +751,7 @@ async function loadHistoryFromSheets() {
         btn.innerHTML = 'Đang tải...';
         btn.disabled = true;
 
-        const data = await gsFetch('getHistory');
+        const data = await gsFetch('getHistory', { days: APP.historyFilterDays });
         if (data && data.success) {
             APP.history.orders = data.orders.map(o => ({
                 order_id: String(o[0]), timestamp: String(o[1]), sub_total: Number(o[2]),

@@ -947,12 +947,31 @@ body {
 
 /* =========================================================
    RESPONSIVE
+/* =========================================================
+   MOBILE RESPONSIVENESS
    ========================================================= */
 @media (max-width: 700px) {
-    .pos-right {
-        width: 100%;
+
+    /* Header Navbar */
+    .header-nav {
+        gap: 2px;
     }
 
+    .nav-btn span {
+        display: none;
+        /* Hide labels, show only icons */
+    }
+
+    .nav-btn {
+        font-size: 1.2rem;
+        padding: 10px;
+    }
+
+    .header-brand {
+        font-size: 1rem;
+    }
+
+    /* POS Page Layout */
     #pagePOS {
         flex-direction: column;
         overflow-y: auto;
@@ -960,11 +979,54 @@ body {
     }
 
     .pos-left {
-        max-height: 55vh;
+        max-height: none;
+        padding-bottom: 20px;
     }
 
+    .pos-right {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid var(--border);
+        height: 50vh;
+        /* Fixed height for cart on mobile */
+    }
+
+    .menu-grid {
+        grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+        gap: 12px;
+    }
+
+    .menu-card {
+        padding: 12px 8px;
+    }
+
+    /* Admin / History Pages */
     .summary-cards {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1fr;
+    }
+
+    .page-content {
+        padding: 16px;
+    }
+
+    /* Tables */
+    .table-container {
+        overflow-x: auto;
+        border-radius: var(--radius-sm);
+    }
+
+    th,
+    td {
+        font-size: 0.8rem;
+        padding: 10px;
+    }
+
+    /* Modals */
+    .modal-card,
+    .receipt-modal-card {
+        width: 95%;
+        max-width: 400px;
+        padding: 20px;
     }
 }
 

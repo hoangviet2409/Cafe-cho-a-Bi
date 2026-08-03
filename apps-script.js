@@ -47,8 +47,9 @@ function doGet(e) {
                 .createTextOutput(JSON.stringify(getMenu()))
                 .setMimeType(ContentService.MimeType.JSON);
         } else if (action === 'getHistory') {
+            const days = e.parameter.days ? parseInt(e.parameter.days) : 7; // default: 7 days
             return ContentService
-                .createTextOutput(JSON.stringify(getHistory()))
+                .createTextOutput(JSON.stringify(getHistory(days)))
                 .setMimeType(ContentService.MimeType.JSON);
         }
         return ContentService
@@ -236,15 +237,33 @@ function setupDemoData() {
 // ============================================================
 // HISTORY OPERATIONS
 // ============================================================
-function getHistory() {
+function getHistory(days) {
+    days = days || 7;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+
     const ordersSheet = getOrCreateSheet(TAB_ORDERS, HEADER_ORDERS);
     const itemsSheet = getOrCreateSheet(TAB_ORDER_ITEMS, HEADER_ORDER_ITEMS);
 
     const ordersData = ordersSheet.getDataRange().getValues();
-    const ordersRows = ordersData.length > 1 ? ordersData.slice(1).filter(r => r[0]) : [];
+    const allOrders = ordersData.length > 1 ? ordersData.slice(1).filter(r => r[0]) : [];
+
+    // Filter orders by date range
+    const filteredOrders = days === 0
+        ? allOrders  // 0 = load all
+        : allOrders.filter(r => {
+            const d = new Date(r[1]);
+            return !isNaN(d) && d >= cutoff;
+        });
+
+    // Collect matched order IDs for efficient item lookup
+    const orderIdSet = new Set(filteredOrders.map(r => String(r[0])));
 
     const itemsData = itemsSheet.getDataRange().getValues();
-    const itemsRows = itemsData.length > 1 ? itemsData.slice(1).filter(r => r[0]) : [];
+    const filteredItems = itemsData.length > 1
+        ? itemsData.slice(1).filter(r => r[0] && orderIdSet.has(String(r[0])))
+        : [];
 
-    return { success: true, orders: ordersRows, items: itemsRows };
+    return { success: true, orders: filteredOrders, items: filteredItems };
 }
+

@@ -11,6 +11,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="preload"
+        as="style" />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet" />
     <link rel="stylesheet" href="style.css" />
@@ -210,15 +214,26 @@
     <!-- ============== PAGE: HISTORY ============== -->
     <main id="pageHistory" class="page">
         <div class="admin-container">
-            <div class="admin-header">
+            <div class="admin-header" style="flex-wrap: wrap; gap: 12px;">
                 <h2>🕒 Lịch sử Bán hàng</h2>
-                <button class="btn-primary" onclick="loadHistoryFromSheets()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                        stroke-width="2.5">
-                        <path d="M21.5 2v6h-6M2.13 15.57a9 9 0 1 0 3.03-9.52L2 9" />
-                    </svg>
-                    Tải lại dữ liệu
-                </button>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <div class="filter-group"
+                        style="display:flex; background:var(--bg3); padding:4px; border-radius:var(--radius-sm); border:1px solid var(--border);">
+                        <button class="nav-btn active" id="btnFilter1" onclick="changeHistoryFilter(1)"
+                            style="padding:6px 12px">Hôm nay</button>
+                        <button class="nav-btn" id="btnFilter7" onclick="changeHistoryFilter(7)"
+                            style="padding:6px 12px">7 Ngày</button>
+                        <button class="nav-btn" id="btnFilter0" onclick="changeHistoryFilter(0)"
+                            style="padding:6px 12px">Tất cả</button>
+                    </div>
+                    <button class="btn-primary" onclick="loadHistoryFromSheets()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2.5">
+                            <path d="M21.5 2v6h-6M2.13 15.57a9 9 0 1 0 3.03-9.52L2 9" />
+                        </svg>
+                        Tải lại
+                    </button>
+                </div>
             </div>
 
             <!-- History Summary Cards -->
@@ -240,7 +255,7 @@
             </div>
 
             <!-- History Table -->
-            <div class="table-wrapper">
+            <div class="table-container">
                 <table class="menu-table">
                     <thead>
                         <tr>
