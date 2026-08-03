@@ -93,6 +93,8 @@ function showPage(page, forceAdmin = false) {
     if (page === 'pos') {
         document.getElementById('pagePOS').classList.add('active');
         document.getElementById('btnPOS').classList.add('active');
+        const searchEl = document.getElementById('searchMenu');
+        if (searchEl) searchEl.value = ''; // Force clear autofill
         renderMenuGrid(APP.menuItems);
     } else if (page === 'history') {
         document.getElementById('pageHistory').classList.add('active');
