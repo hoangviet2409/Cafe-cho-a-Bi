@@ -74,6 +74,7 @@ function handleRequest(e) {
             case 'deleteMenuItem': return deleteMenuItem(body.id);
             case 'appendOrder': return appendOrder(body.row);
             case 'appendOrderItem': return appendOrderItem(body.row);
+            case 'checkoutOrder': return checkoutOrder(body.orderRow, body.itemRows);
             case 'cancelOrder': return cancelOrder(body.order_id);
             default: return { success: false, error: 'Unknown action: ' + action };
         }
@@ -140,6 +141,27 @@ function appendOrder(row) {
         'ACTIVE',
     ]);
     return { success: true };
+}
+
+function checkoutOrder(orderRow, itemRows) {
+    try {
+        appendOrder(orderRow);
+        if (itemRows && itemRows.length > 0) {
+            const sheet = getOrCreateSheet(TAB_ORDER_ITEMS, HEADER_ORDER_ITEMS);
+            const rowsToInsert = itemRows.map(row => [
+                row.order_id,
+                row.item_name,
+                row.quantity,
+                row.unit_price,
+                row.line_total,
+                'ACTIVE'
+            ]);
+            sheet.getRange(sheet.getLastRow() + 1, 1, rowsToInsert.length, 6).setValues(rowsToInsert);
+        }
+        return { success: true };
+    } catch (e) {
+        return { success: false, error: e.toString() };
+    }
 }
 
 function cancelOrder(orderId) {

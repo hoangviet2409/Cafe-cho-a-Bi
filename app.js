@@ -406,34 +406,31 @@ async function checkout() {
         const taxAmount = calcTax(subtotal, vatPercent);
         const grandTotal = calcGrandTotal(subtotal, taxAmount);
 
-        // BƯỚC 2: Insert Order (tab Orders)
-        const orderRow = {
-            order_id: orderId,
-            timestamp: now,
-            sub_total: subtotal,
-            tax_percent: vatPercent,
-            tax_amount: taxAmount,
-            grand_total: grandTotal,
-        };
-
+        // BƯỚC 2: Bulk Insert Order & Items
         if (!APP.demoMode) {
-            const r2 = await gsFetch('appendOrder', { row: orderRow });
-            if (!r2.success) throw new Error(r2.error || 'Lỗi ghi Orders');
-        }
+            const orderRow = {
+                order_id: orderId,
+                timestamp: now,
+                sub_total: subtotal,
+                tax_percent: vatPercent,
+                tax_amount: taxAmount,
+                grand_total: grandTotal,
+            };
 
-        // BƯỚC 3: Insert Order Items (tab Order_Items – vòng lặp qua cart_items)
-        if (!APP.demoMode) {
-            for (const item of APP.cartItems) {
-                const itemRow = {
-                    order_id: orderId,
-                    item_name: item.name,
-                    quantity: item.quantity,
-                    unit_price: item.price,
-                    line_total: item.quantity * item.price,
-                };
-                const r3 = await gsFetch('appendOrderItem', { row: itemRow });
-                if (!r3.success) throw new Error(r3.error || 'Lỗi ghi Order_Items');
-            }
+            const itemRows = APP.cartItems.map(item => ({
+                order_id: orderId,
+                item_name: item.name,
+                quantity: item.quantity,
+                unit_price: item.price,
+                line_total: item.quantity * item.price,
+            }));
+
+            const r2 = await gsFetch('checkoutOrder', {
+                orderRow: orderRow,
+                itemRows: itemRows
+            });
+
+            if (!r2.success) throw new Error(r2.error || 'Lỗi ghi dữ liệu thanh toán');
         }
 
         // BƯỚC 4: Preview Hóa Đơn & Print
