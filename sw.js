@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cafe-pos-v2'; // Đổi tên cache để update
+const CACHE_NAME = 'cafe-pos-v3'; // Đổi tên cache để update
 const urlsToCache = [
     './',
     './index.html',
@@ -29,6 +29,12 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
+    // Bỏ qua các API bên ngoài, đặc biệt là Google Apps Script
+    // Trình duyệt sẽ tự xử lý các request này mà không qua Service Worker
+    if (event.request.url.includes('script.google.com') || event.request.method !== 'GET') {
+        return;
+    }
+
     event.respondWith(
         caches.match(event.request)
             .then(response => {
