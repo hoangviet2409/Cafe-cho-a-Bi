@@ -8,6 +8,8 @@
 // ============================================================
 const APP = {
     scriptUrl: '',        // Google Apps Script URL
+    apiKey: '',           // Optional API key shared with Apps Script
+    adminPin: '',         // Kept only in memory for privileged actions
     demoMode: false,
     menuItems: [],        // Array<{id, name, price, status}>
     cartItems: [],        // Array<{id, name, price, quantity}>
@@ -18,7 +20,19 @@ const APP = {
     historyFilterDays: 1, // Default: 1 (Hôm nay), 7 (7 ngày), 0 (Tất cả)
     deleteTargetId: null,
     orderRowIndex: null,  // for GSheets row tracking
+    resetCartOnReceiptClose: false,
 };
+
+const STORAGE_KEYS = {
+    scriptUrl: 'cafe_pos_gsheet_url',
+    apiKey: 'cafe_pos_api_key',
+    menuCache: 'cafe_pos_menu_cache',
+    menuCacheTs: 'cafe_pos_menu_ts',
+    menuCacheUrl: 'cafe_pos_menu_url',
+};
+
+const WRITE_VERIFY_ATTEMPTS = 6;
+const WRITE_VERIFY_DELAY_MS = 700;
 
 // Demo menu data (khi không có Google Sheets)
 const DEMO_MENU = [
@@ -57,8 +71,16 @@ function getEmoji(name) {
 // 2. PAGE NAVIGATION
 // ============================================================
 let isAuthenticatedAdmin = false;
-const ADMIN_PIN = '1234';
-
+// LƯU Ý: PIN admin KHÔNG được hardcode ở đây nữa. Trước đây có 1 hằng số
+// ADMIN_PIN = '1234' cố định trong file này — nếu bạn đổi ADMIN_PIN trong
+// apps-script.js (theo hướng dẫn bảo mật) mà quên sửa luôn giá trị hardcode
+// ở đây, mọi thao tác Admin (sửa/xóa món, hủy đơn) sẽ bị server từ chối dù
+// bạn "đăng nhập" Admin thành công trên giao diện. Đây là lỗi rất hay gặp.
+//
+// Cách mới: PIN nhập ở đây chỉ là "cổng mềm" để mở giao diện Admin (tránh
+// nhân viên bấm nhầm), còn PIN thật sự được server (apps-script.js) xác minh
+// mỗi khi có thao tác ghi dữ liệu. Nhờ vậy chỉ có DUY NHẤT MỘT nơi lưu PIN
+// thật — trong apps-script.js — không còn nguy cơ lệch nhau.
 function openPinModal() {
     document.getElementById('pinInput').value = '';
     document.getElementById('pinModal').classList.add('active');
@@ -68,16 +90,21 @@ function closePinModal() {
     document.getElementById('pinModal').classList.remove('active');
 }
 function verifyPin() {
-    const val = document.getElementById('pinInput').value;
-    if (val === ADMIN_PIN) {
-        isAuthenticatedAdmin = true;
-        closePinModal();
-        showPage('admin', true);
-        showToast('Truy cập Admin thành công', 'success');
-    } else {
-        showToast('Mã PIN không đúng!', 'error');
+    const val = document.getElementById('pinInput').value.trim();
+    if (val.length < 4) {
+        showToast('PIN phải có ít nhất 4 ký tự', 'error');
         document.getElementById('pinInput').value = '';
         document.getElementById('pinInput').focus();
+        return;
+    }
+    APP.adminPin = val;
+    isAuthenticatedAdmin = true;
+    closePinModal();
+    showPage('admin', true);
+    if (APP.demoMode) {
+        showToast('Truy cập Admin thành công (Demo)', 'success');
+    } else {
+        showToast('Đã vào trang Admin — PIN sẽ được máy chủ kiểm tra khi bạn lưu thay đổi', 'info');
     }
 }
 
@@ -122,16 +149,19 @@ function startDemoMode() {
 
 function connectGSheets() {
     const url = document.getElementById('inputScriptUrl').value.trim();
+    const apiKey = document.getElementById('inputApiKey')?.value.trim() || '';
     if (!url) { showToast('Vui lòng nhập Script URL', 'error'); return; }
 
     // Save URL to localStorage
-    localStorage.setItem('cafe_pos_gsheet_url', url);
+    localStorage.setItem(STORAGE_KEYS.scriptUrl, url);
+    localStorage.setItem(STORAGE_KEYS.apiKey, apiKey);
 
     APP.scriptUrl = url;
+    APP.apiKey = apiKey;
     APP.demoMode = false;
     closeSetupModal();
     setStatusBadge('online', '● Online');
-    loadMenuFromSheets();
+    loadMenuFromSheets(true);
 }
 
 function openSetupModal() {
@@ -160,25 +190,38 @@ function setStatusBadge(type, text) {
 async function gsFetch(action, payload = {}) {
     if (APP.demoMode) return { success: true };
     try {
-        if (action === 'getMenu' || action === 'getHistory') {
+        if (action === 'getMenu' || action === 'getHistory' || action === 'getOrder') {
             // GET request: Apps Script trả về JSON qua doGet, không bị CORS
             const url = new URL(APP.scriptUrl);
             url.searchParams.set('action', action);
+            if (APP.apiKey) url.searchParams.set('key', APP.apiKey);
             // Truyền days param cho getHistory
             if (action === 'getHistory' && payload.days !== undefined) {
                 url.searchParams.set('days', payload.days);
             }
+            if (action === 'getOrder' && payload.order_id) {
+                url.searchParams.set('order_id', payload.order_id);
+            }
             const res = await fetch(url.toString(), { method: 'GET' });
-            return await res.json();
+            const data = await res.json();
+            if (data && data.success === false) {
+                throw new Error(data.error || 'Google Sheets request failed');
+            }
+            return data;
         } else {
-            // POST no-cors: response sẽ là opaque (không đọc được) → giả định thành công
+            const body = APP.apiKey
+                ? { action, key: APP.apiKey, ...payload }
+                : { action, ...payload };
+            if (['appendMenuItem', 'updateMenuItem', 'deleteMenuItem', 'cancelOrder'].includes(action)) body.admin_pin = APP.adminPin;
+
+            // POST no-cors: Apps Script nhận dữ liệu, sau đó app xác minh bằng GET.
             await fetch(APP.scriptUrl, {
                 method: 'POST',
                 mode: 'no-cors',
                 headers: { 'Content-Type': 'text/plain' },
-                body: JSON.stringify({ action, ...payload }),
+                body: JSON.stringify(body),
             });
-            return { success: true };
+            return { success: true, pendingVerification: true };
         }
     } catch (e) {
         console.error('GSheets error:', e);
@@ -186,21 +229,112 @@ async function gsFetch(action, payload = {}) {
     }
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Dịch lỗi kỹ thuật (từ fetch/Apps Script) thành thông báo có thể hành động được,
+ * thay vì các toast chung chung như "Không thể kết nối" không nói rõ lý do.
+ */
+function friendlyErrorMessage(e) {
+    const msg = (e && e.message) ? e.message : String(e || '');
+    if (/Unauthorized admin action/i.test(msg)) {
+        return 'Sai PIN Admin (không khớp ADMIN_PIN trong apps-script.js), hoặc ADMIN_PIN trên server chưa được cấu hình.';
+    }
+    if (/Unauthorized request/i.test(msg)) {
+        return 'API Key không khớp với API_KEY trong apps-script.js. Kiểm tra lại ô "API Key" khi kết nối.';
+    }
+    if (/API_KEY has not been configured/i.test(msg)) {
+        return 'Server chưa cấu hình API_KEY (vẫn còn giá trị REPLACE_...). Vào Apps Script sửa API_KEY rồi Deploy lại (New version).';
+    }
+    if (/Failed to fetch|NetworkError|TypeError: Load failed/i.test(msg)) {
+        return 'Không gọi được URL Apps Script. Kiểm tra: URL đúng dạng .../exec, đã Deploy dạng Web App (Anyone có quyền truy cập), và có kết nối mạng.';
+    }
+    if (/Unexpected token|is not valid JSON/i.test(msg)) {
+        return 'Apps Script trả về nội dung không phải JSON — thường do URL sai (không phải link /exec) hoặc quyền truy cập Deploy chưa đặt "Anyone".';
+    }
+    return msg || 'Lỗi không xác định';
+}
+
+function invalidateMenuCache() {
+    localStorage.removeItem(STORAGE_KEYS.menuCache);
+    localStorage.removeItem(STORAGE_KEYS.menuCacheTs);
+    localStorage.removeItem(STORAGE_KEYS.menuCacheUrl);
+}
+
+function normalizeMenuRows(rows) {
+    return rows.map(r => ({
+        id: String(r[0]),
+        name: String(r[1]),
+        price: Number(r[2]),
+        status: String(r[3]),
+        emoji: getEmoji(String(r[1])),
+    }));
+}
+
+function saveMenuCache() {
+    localStorage.setItem(STORAGE_KEYS.menuCache, JSON.stringify(APP.menuItems));
+    localStorage.setItem(STORAGE_KEYS.menuCacheTs, Date.now().toString());
+    localStorage.setItem(STORAGE_KEYS.menuCacheUrl, APP.scriptUrl);
+}
+
+async function verifyMenuMutation(predicate, errorMessage) {
+    for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
+        const data = await gsFetch('getMenu');
+        if (data && data.rows) {
+            const nextItems = normalizeMenuRows(data.rows);
+            if (predicate(nextItems)) {
+                APP.menuItems = nextItems;
+                saveMenuCache();
+                renderMenuTable();
+                renderMenuGrid(APP.menuItems);
+                return true;
+            }
+        }
+        await sleep(WRITE_VERIFY_DELAY_MS);
+    }
+    throw new Error(errorMessage);
+}
+
+async function verifyOrderWritten(orderId, expectedItems) {
+    for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
+        const data = await gsFetch('getOrder', { order_id: orderId });
+        if (data && data.order && Array.isArray(data.items) && data.items.length === expectedItems.length
+            && data.items.every((item, index) => Number(item[2]) === expectedItems[index].quantity
+                && Number(item[3]) === expectedItems[index].unit_price && String(item[5]) === 'ACTIVE')) return data;
+        await sleep(WRITE_VERIFY_DELAY_MS);
+    }
+    throw new Error('Không thể xác minh đơn đã ghi vào Google Sheets');
+}
+
+async function verifyOrderCancelled(orderId) {
+    for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
+        const data = await gsFetch('getOrder', { order_id: orderId });
+        if (data && data.order && String(data.order[6]) === 'CANCELLED') return data;
+        await sleep(WRITE_VERIFY_DELAY_MS);
+    }
+    throw new Error('Không thể xác minh đơn đã hủy trong Google Sheets');
+}
+
 async function loadMenuFromSheets(forceRefresh = false) {
     // Check localStorage cache (valid for 15 minutes)
-    const CACHE_KEY = 'cafe_pos_menu_cache';
-    const CACHE_TS_KEY = 'cafe_pos_menu_ts';
     const CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 
     if (!forceRefresh) {
-        const cached = localStorage.getItem(CACHE_KEY);
-        const ts = parseInt(localStorage.getItem(CACHE_TS_KEY) || '0');
-        if (cached && (Date.now() - ts) < CACHE_TTL) {
-            APP.menuItems = JSON.parse(cached);
-            renderMenuGrid(APP.menuItems);
-            renderMenuTable();
-            showToast(`Thực đơn sẵn sàng (${APP.menuItems.length} món) ⚡`, 'success');
-            return;
+        const cached = localStorage.getItem(STORAGE_KEYS.menuCache);
+        const cachedUrl = localStorage.getItem(STORAGE_KEYS.menuCacheUrl);
+        const ts = parseInt(localStorage.getItem(STORAGE_KEYS.menuCacheTs) || '0');
+        if (cached && cachedUrl === APP.scriptUrl && (Date.now() - ts) < CACHE_TTL) {
+            try {
+                APP.menuItems = JSON.parse(cached);
+                renderMenuGrid(APP.menuItems);
+                renderMenuTable();
+                showToast(`Thực đơn sẵn sàng (${APP.menuItems.length} món) ⚡`, 'success');
+                return true;
+            } catch {
+                invalidateMenuCache();
+            }
         }
     }
 
@@ -208,20 +342,22 @@ async function loadMenuFromSheets(forceRefresh = false) {
         showToast('Đang tải thực đơn...', 'info');
         const data = await gsFetch('getMenu');
         if (data && data.rows) {
-            APP.menuItems = data.rows.map(r => ({
-                id: String(r[0]), name: String(r[1]), price: Number(r[2]), status: String(r[3]),
-                emoji: getEmoji(String(r[1])),
-            }));
+            APP.menuItems = normalizeMenuRows(data.rows);
             // Save to cache
-            localStorage.setItem(CACHE_KEY, JSON.stringify(APP.menuItems));
-            localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
+            saveMenuCache();
         }
         renderMenuGrid(APP.menuItems);
         renderMenuTable();
         showToast(`Đã tải ${APP.menuItems.length} món ✓`, 'success');
+        if (APP.menuItems.length === 0) {
+            showToast('Kết nối OK nhưng tab "Menu" đang trống — kiểm tra Google Sheet hoặc chạy setupDemoData()', 'info', 5000);
+        }
+        return true;
     } catch (e) {
-        showToast('Không thể kết nối Google Sheets', 'error');
+        console.error('loadMenuFromSheets error:', e);
+        showToast(`Không thể tải thực đơn: ${friendlyErrorMessage(e)}`, 'error', 6000);
         setStatusBadge('offline', '● Offline');
+        return false;
     }
 }
 
@@ -244,11 +380,11 @@ function renderMenuGrid(items, filterText = '') {
     }
 
     grid.innerHTML = active.map(item => `
-    <div class="menu-card" onclick="addToCart('${item.id}', '${escHtml(item.name)}', ${item.price})">
+    <div class="menu-card" data-menu-id="${escHtml(item.id)}" role="button" tabindex="0">
       <div class="menu-card-emoji">${item.emoji || getEmoji(item.name)}</div>
       <div class="menu-card-name">${escHtml(item.name)}</div>
       <div class="menu-card-price">${formatCurrency(item.price)}</div>
-      <button class="menu-card-add" onclick="event.stopPropagation();addToCart('${item.id}', '${escHtml(item.name)}', ${item.price})">
+      <button class="menu-card-add" data-add-to-cart="${escHtml(item.id)}">
         + Thêm vào Bill
       </button>
     </div>
@@ -257,6 +393,12 @@ function renderMenuGrid(items, filterText = '') {
 
 function filterMenu(val) {
     renderMenuGrid(APP.menuItems, val);
+}
+
+function addToCartById(id) {
+    const item = APP.menuItems.find(i => i.id === id);
+    if (!item) return;
+    addToCart(item.id, item.name, item.price);
 }
 
 // ============================================================
@@ -332,12 +474,12 @@ function renderCart() {
     }
 
     cartList.innerHTML = APP.cartItems.map(item => `
-    <div class="cart-item" id="cart-${item.id}">
+    <div class="cart-item" id="cart-${escHtml(item.id)}">
       <span class="cart-item-name" title="${escHtml(item.name)}">${escHtml(item.name)}</span>
       <div class="cart-item-controls">
-        <button class="qty-btn minus" onclick="decreaseQty('${item.id}')" title="Giảm">−</button>
+        <button class="qty-btn minus" data-cart-action="decrease" data-cart-id="${escHtml(item.id)}" title="Giảm">−</button>
         <span class="qty-num">${item.quantity}</span>
-        <button class="qty-btn" onclick="increaseQty('${item.id}')" title="Tăng">+</button>
+        <button class="qty-btn" data-cart-action="increase" data-cart-id="${escHtml(item.id)}" title="Tăng">+</button>
       </div>
       <span class="cart-item-price">${formatCurrency(item.price * item.quantity)}</span>
     </div>
@@ -421,6 +563,7 @@ async function checkout() {
 
             const itemRows = APP.cartItems.map(item => ({
                 order_id: orderId,
+                menu_id: item.id,
                 item_name: item.name,
                 quantity: item.quantity,
                 unit_price: item.price,
@@ -433,10 +576,12 @@ async function checkout() {
             });
 
             if (!r2.success) throw new Error(r2.error || 'Lỗi ghi dữ liệu thanh toán');
+            await verifyOrderWritten(orderId, itemRows);
         }
 
         // BƯỚC 4: Preview Hóa Đơn & Print
         buildReceipt(orderId, now, subtotal, vatPercent, taxAmount, grandTotal);
+        APP.resetCartOnReceiptClose = true;
         document.getElementById('receiptModal').classList.add('active');
 
         // Reset btn trạng thái (việc reset giỏ hàng sẽ làm khi đóng hóa đơn)
@@ -445,7 +590,7 @@ async function checkout() {
 
     } catch (err) {
         console.error('Checkout error:', err);
-        showToast(`❌ Lỗi: ${err.message}`, 'error');
+        showToast(`❌ Lỗi: ${friendlyErrorMessage(err)}`, 'error', 6000);
         btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> XUẤT HÓA ĐƠN`;
         btn.disabled = false;
     }
@@ -472,7 +617,7 @@ function renderMenuTable() {
 
     tbody.innerHTML = items.map(item => `
     <tr>
-      <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace">${item.id}</td>
+      <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace">${escHtml(item.id)}</td>
       <td style="font-weight:600">${item.emoji || getEmoji(item.name)} ${escHtml(item.name)}</td>
       <td style="color:var(--accent);font-weight:700">${formatCurrency(item.price)}</td>
       <td>
@@ -482,8 +627,8 @@ function renderMenuTable() {
       </td>
       <td>
         <div class="table-actions">
-          <button class="action-btn action-btn-edit" onclick="openEditModal('${item.id}')">✏️ Sửa</button>
-          <button class="action-btn action-btn-del"  onclick="openDeleteModal('${item.id}', '${escHtml(item.name)}')">🗑️ Xóa</button>
+          <button class="action-btn action-btn-edit" data-menu-action="edit" data-menu-id="${escHtml(item.id)}">✏️ Sửa</button>
+          <button class="action-btn action-btn-del" data-menu-action="delete" data-menu-id="${escHtml(item.id)}">🗑️ Xóa</button>
         </div>
       </td>
     </tr>
@@ -529,36 +674,49 @@ async function saveItem() {
         // UPDATE
         const item = APP.menuItems.find(i => i.id === editId);
         if (!item) return;
-        item.name = name; item.price = price; item.status = status; item.emoji = getEmoji(name);
         if (!APP.demoMode) {
             try {
                 await gsFetch('updateMenuItem', { id: editId, name, price, status });
-            } catch { showToast('Lưu thất bại', 'error'); return; }
+                await verifyMenuMutation(
+                    items => items.some(i => i.id === editId && i.name === name && i.price === price && i.status === status),
+                    'Không thể xác minh món đã được cập nhật'
+                );
+            } catch (err) { showToast(`Lưu thất bại: ${friendlyErrorMessage(err)}`, 'error', 6000); return; }
+        } else {
+            item.name = name; item.price = price; item.status = status; item.emoji = getEmoji(name);
         }
         showToast('Đã cập nhật món ✓', 'success');
     } else {
         // CREATE
         const newId = 'M' + Date.now();
         const newItem = { id: newId, name, price, status, emoji: getEmoji(name) };
-        APP.menuItems.push(newItem);
         if (!APP.demoMode) {
             try {
                 await gsFetch('appendMenuItem', { row: { id: newId, name, price, status } });
-            } catch { showToast('Thêm món thất bại', 'error'); return; }
+                await verifyMenuMutation(
+                    items => items.some(i => i.id === newId && i.name === name && i.price === price && i.status === status),
+                    'Không thể xác minh món mới trong Google Sheets'
+                );
+            } catch (err) { showToast(`Thêm món thất bại: ${friendlyErrorMessage(err)}`, 'error', 6000); return; }
+        } else {
+            APP.menuItems.push(newItem);
         }
         showToast('Đã thêm món mới ✓', 'success');
     }
 
     closeItemModal();
-    renderMenuTable();
-    renderMenuGrid(APP.menuItems);
+    if (APP.demoMode) {
+        renderMenuTable();
+        renderMenuGrid(APP.menuItems);
+    }
 }
 
 // ---- Delete ----
 function openDeleteModal(id, name) {
+    const itemName = name || APP.menuItems.find(i => i.id === id)?.name || '';
     APP.deleteTargetId = id;
     document.getElementById('deleteModalMsg').textContent =
-        `Bạn có chắc muốn xóa món "${name}"? Hành động này không thể hoàn tác.`;
+        `Bạn có chắc muốn xóa món "${itemName}"? Hành động này không thể hoàn tác.`;
     document.getElementById('deleteModal').classList.add('active');
 }
 
@@ -572,14 +730,23 @@ async function confirmDelete() {
     if (!id) return;
     const item = APP.menuItems.find(i => i.id === id);
 
-    APP.menuItems = APP.menuItems.filter(i => i.id !== id);
     if (!APP.demoMode) {
-        try { await gsFetch('deleteMenuItem', { id }); } catch { showToast('Xóa thất bại', 'error'); return; }
+        try {
+            await gsFetch('updateMenuItem', { id, name: item.name, price: item.price, status: 'Inactive' });
+            await verifyMenuMutation(
+                items => items.some(i => i.id === id && i.status === 'Inactive'),
+                'Không thể xác minh món đã được xóa'
+            );
+        } catch (err) { showToast(`Xóa thất bại: ${friendlyErrorMessage(err)}`, 'error', 6000); return; }
+    } else {
+        APP.menuItems = APP.menuItems.filter(i => i.id !== id);
     }
     showToast(`Đã xóa "${item?.name || ''}" ✓`, 'success');
     closeDeleteModal();
-    renderMenuTable();
-    renderMenuGrid(APP.menuItems);
+    if (APP.demoMode) {
+        renderMenuTable();
+        renderMenuGrid(APP.menuItems);
+    }
 }
 
 // ============================================================
@@ -618,6 +785,52 @@ function showToast(msg, type = 'info', duration = 2800) {
     }, duration);
 }
 
+function handleDynamicClick(e) {
+    const addButton = e.target.closest('[data-add-to-cart]');
+    if (addButton) {
+        e.stopPropagation();
+        addToCartById(addButton.dataset.addToCart);
+        return;
+    }
+
+    const menuCard = e.target.closest('.menu-card[data-menu-id]');
+    if (menuCard) {
+        addToCartById(menuCard.dataset.menuId);
+        return;
+    }
+
+    const cartButton = e.target.closest('[data-cart-action]');
+    if (cartButton) {
+        const id = cartButton.dataset.cartId;
+        if (cartButton.dataset.cartAction === 'increase') increaseQty(id);
+        if (cartButton.dataset.cartAction === 'decrease') decreaseQty(id);
+        return;
+    }
+
+    const menuButton = e.target.closest('[data-menu-action]');
+    if (menuButton) {
+        const id = menuButton.dataset.menuId;
+        if (menuButton.dataset.menuAction === 'edit') openEditModal(id);
+        if (menuButton.dataset.menuAction === 'delete') openDeleteModal(id);
+        return;
+    }
+
+    const historyButton = e.target.closest('[data-history-action]');
+    if (historyButton) {
+        const orderId = historyButton.dataset.orderId;
+        if (historyButton.dataset.historyAction === 'reprint') reprintOrder(orderId);
+        if (historyButton.dataset.historyAction === 'cancel') cancelOrderUI(orderId);
+    }
+}
+
+function handleDynamicKeydown(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const menuCard = e.target.closest('.menu-card[data-menu-id]');
+    if (!menuCard) return;
+    e.preventDefault();
+    addToCartById(menuCard.dataset.menuId);
+}
+
 // ============================================================
 // 11. INIT (entrypoint)
 // ============================================================
@@ -641,6 +854,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('deleteModal').classList.remove('active');
         }
     });
+    document.addEventListener('click', handleDynamicClick);
+    document.addEventListener('keydown', handleDynamicKeydown);
 
     // Add CSS spin animation for loading state
     const spinStyle = document.createElement('style');
@@ -664,7 +879,10 @@ document.getElementById('pinInput')?.addEventListener('keyup', (e) => {
 
 // Kiểm tra Local Storage xem có Script URL nào đã lưu chưa
 window.addEventListener('DOMContentLoaded', () => {
-    const savedUrl = localStorage.getItem('cafe_pos_gsheet_url');
+    const savedUrl = localStorage.getItem(STORAGE_KEYS.scriptUrl);
+    const savedApiKey = localStorage.getItem(STORAGE_KEYS.apiKey) || '';
+    const apiKeyInput = document.getElementById('inputApiKey');
+    if (apiKeyInput) apiKeyInput.value = savedApiKey;
     if (savedUrl) {
         document.getElementById('inputScriptUrl').value = savedUrl;
         connectGSheets(); // Tự động kết nối nếu đã lưu
@@ -709,12 +927,14 @@ function buildReceipt(orderId, timestamp, subtotal, vatPercent, taxAmount, grand
 
 function closeReceipt() {
     document.getElementById('receiptModal').classList.remove('active');
-    // Reset giỏ hàng sau khi in/xem xong hóa đơn
-    APP.cartItems = [];
-    document.getElementById('vatSelect').value = '0';
-    renderCart();
-    updateCalc();
-    showToast('Đã đóng hóa đơn & sẵn sàng đơn mới', 'info');
+    if (APP.resetCartOnReceiptClose) {
+        APP.cartItems = [];
+        document.getElementById('vatSelect').value = '0';
+        renderCart();
+        updateCalc();
+        showToast('Đã đóng hóa đơn & sẵn sàng đơn mới', 'info');
+    }
+    APP.resetCartOnReceiptClose = false;
 }
 
 function printReceipt() {
@@ -744,9 +964,11 @@ async function loadHistoryFromSheets() {
         return;
     }
 
+    let btn;
+    let oldHtml;
     try {
-        const btn = document.querySelector('#pageHistory .btn-primary');
-        const oldHtml = btn.innerHTML;
+        btn = document.querySelector('#pageHistory .btn-primary');
+        oldHtml = btn.innerHTML;
         btn.innerHTML = 'Đang tải...';
         btn.disabled = true;
 
@@ -764,12 +986,14 @@ async function loadHistoryFromSheets() {
             showToast('Đã tải lịch sử ✓', 'success');
         }
 
-        btn.innerHTML = oldHtml;
-        btn.disabled = false;
-
         renderHistoryTable();
     } catch (e) {
         showToast('Không thể tải lịch sử', 'error');
+    } finally {
+        if (btn) {
+            btn.innerHTML = oldHtml;
+            btn.disabled = false;
+        }
     }
 }
 
@@ -780,21 +1004,19 @@ function renderHistoryTable() {
     // Sort by timestamp descending
     orders.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-    // Today's stats — only count ACTIVE orders
-    const todayStr = new Date().toLocaleDateString('vi-VN');
-    let todayRevenue = 0;
-    let todayOrdersCount = 0;
+    // Summary follows the selected history range and excludes cancelled orders.
+    let totalRevenue = 0;
+    let totalOrdersCount = 0;
 
     orders.forEach(o => {
-        const orderDateStr = new Date(o.timestamp).toLocaleDateString('vi-VN');
-        if (orderDateStr === todayStr && o.status !== 'CANCELLED') {
-            todayRevenue += o.grand_total;
-            todayOrdersCount++;
+        if (o.status !== 'CANCELLED') {
+            totalRevenue += o.grand_total;
+            totalOrdersCount++;
         }
     });
 
-    document.getElementById('historyTotalRevenue').textContent = formatCurrency(todayRevenue);
-    document.getElementById('historyTotalOrders').textContent = todayOrdersCount;
+    document.getElementById('historyTotalRevenue').textContent = formatCurrency(totalRevenue);
+    document.getElementById('historyTotalOrders').textContent = totalOrdersCount;
 
     if (orders.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
@@ -813,11 +1035,11 @@ function renderHistoryTable() {
             : 'color:var(--accent);font-weight:700;';
         const actionBtns = isCancelled
             ? `<span style="color:var(--red);font-size:0.78rem;font-weight:600;">✕ Đã hủy</span>`
-            : `<button class="action-btn" onclick="reprintOrder('${o.order_id}')">🖨️ In lại</button>
-               <button class="action-btn" style="margin-left:6px;color:var(--red);border-color:rgba(239,68,68,0.4);" onclick="cancelOrderUI('${o.order_id}')">✕ Hủy</button>`;
+            : `<button class="action-btn" data-history-action="reprint" data-order-id="${escHtml(o.order_id)}">🖨️ In lại</button>
+               <button class="action-btn" style="margin-left:6px;color:var(--red);border-color:rgba(239,68,68,0.4);" data-history-action="cancel" data-order-id="${escHtml(o.order_id)}">✕ Hủy</button>`;
         return `
             <tr style="${rowStyle}">
-              <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace;font-weight:bold">${o.order_id}</td>
+              <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace;font-weight:bold">${escHtml(o.order_id)}</td>
               <td style="font-size:0.85rem">${dateStr}</td>
               <td style="${priceStyle}">${formatCurrency(o.grand_total)}</td>
               <td>${actionBtns}</td>
@@ -832,6 +1054,7 @@ async function cancelOrderUI(orderId) {
     try {
         if (!APP.demoMode) {
             await gsFetch('cancelOrder', { order_id: orderId });
+            await verifyOrderCancelled(orderId);
         }
         // Update local state
         const order = APP.history.orders.find(o => o.order_id === orderId);
@@ -839,7 +1062,7 @@ async function cancelOrderUI(orderId) {
         renderHistoryTable();
         showToast(`Đã hủy đơn ${orderId}`, 'info');
     } catch (e) {
-        showToast('Không thể hủy đơn. Thử lại.', 'error');
+        showToast(`Không thể hủy đơn: ${friendlyErrorMessage(e)}`, 'error', 6000);
     }
 }
 
@@ -861,5 +1084,11 @@ function reprintOrder(orderId) {
 
     // Phục hồi giỏ hàng hiện tại
     APP.cartItems = originalCart;
+    APP.resetCartOnReceiptClose = false;
+    document.getElementById('btnConfirmCheckout').hidden = true;
+    document.getElementById('btnPrintReceipt').hidden = false;
     document.getElementById('receiptModal').classList.add('active');
 }
+function previewCheckout(){if(!APP.cartItems.length)return showToast('Cart is empty','error');const v=Number(document.getElementById('vatSelect').value),s=calcSubtotal(),t=calcTax(s,v);APP.pendingCheckout={orderId:generateOrderId(),timestamp:new Date().toISOString(),vatPercent:v,subtotal:s,taxAmount:t,grandTotal:calcGrandTotal(s,t)};buildReceipt(APP.pendingCheckout.orderId,APP.pendingCheckout.timestamp,s,v,t,APP.pendingCheckout.grandTotal);document.getElementById('btnConfirmCheckout').hidden=false;document.getElementById('btnPrintReceipt').hidden=true;document.getElementById('receiptModal').classList.add('active')}
+
+async function confirmCheckout(){const p=APP.pendingCheckout;if(!p)return;const b=document.getElementById('btnConfirmCheckout');b.disabled=true;b.textContent='Saving...';APP.pendingCheckout=null;await checkout();if(APP.resetCartOnReceiptClose){b.hidden=true;document.getElementById('btnPrintReceipt').hidden=false}else{APP.pendingCheckout=p;b.disabled=false;b.textContent='Confirm payment';showToast('Could not save order','error')}}
