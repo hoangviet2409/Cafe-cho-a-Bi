@@ -69,6 +69,11 @@
                 <input id="inputScriptUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec"
                     autocomplete="off" spellcheck="false" />
             </div>
+            <div class="form-group">
+                <label>API Key (tùy chọn)</label>
+                <input id="inputApiKey" type="password" placeholder="Đặt cùng API_KEY trong apps-script.js"
+                    autocomplete="off" spellcheck="false" />
+            </div>
             <div class="modal-hint">
                 <strong>💡 Hướng dẫn nhanh:</strong>
                 <ol>
@@ -141,7 +146,7 @@
                     <span>Tổng cộng</span>
                     <span id="grandTotalDisplay">0 ₫</span>
                 </div>
-                <button id="btnCheckout" class="btn-checkout" onclick="checkout()" disabled>
+                <button id="btnCheckout" class="btn-checkout" onclick="previewCheckout()" disabled>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                         stroke-width="2.5">
                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
@@ -373,7 +378,8 @@
             <!-- Action buttons (not printed) -->
             <div class="receipt-actions no-print">
                 <button class="btn-secondary" onclick="closeReceipt()">✕ Đóng</button>
-                <button class="btn-primary" onclick="printReceipt()">
+                <button id="btnConfirmCheckout" class="btn-primary" onclick="confirmCheckout()" hidden>&#10003; X&#225;c nh&#7853;n thanh to&#225;n</button>
+                <button id="btnPrintReceipt" class="btn-primary" onclick="printReceipt()">
                     🖨️ In hóa đơn
                 </button>
             </div>
