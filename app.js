@@ -21,6 +21,7 @@ const APP = {
     deleteTargetId: null,
     orderRowIndex: null,  // for GSheets row tracking
     resetCartOnReceiptClose: false,
+    pendingCancelOrderId: null, // đơn đang chờ hủy sau khi xác thực PIN
 };
 
 const STORAGE_KEYS = {
@@ -100,6 +101,16 @@ function verifyPin() {
     APP.adminPin = val;
     isAuthenticatedAdmin = true;
     closePinModal();
+
+    // Nếu người dùng bấm "Hủy" ở trang Lịch sử khi chưa xác thực, tiếp tục
+    // hành động đó luôn sau khi nhập PIN, thay vì chuyển sang trang Admin.
+    if (APP.pendingCancelOrderId) {
+        const orderId = APP.pendingCancelOrderId;
+        APP.pendingCancelOrderId = null;
+        performCancelOrder(orderId);
+        return;
+    }
+
     showPage('admin', true);
     if (APP.demoMode) {
         showToast('Truy cập Admin thành công (Demo)', 'success');
@@ -1049,6 +1060,19 @@ function renderHistoryTable() {
 }
 
 async function cancelOrderUI(orderId) {
+    // Trước đây nút này gửi thẳng admin_pin rỗng lên server nếu bạn chưa từng
+    // vào trang Admin nhập PIN trong phiên làm việc — server từ chối âm thầm,
+    // và người dùng chỉ thấy lỗi "Không thể xác minh..." sau ~4 giây chờ, không
+    // rõ lý do thật là do chưa nhập PIN. Giờ bắt nhập PIN ngay tại đây trước.
+    if (!APP.demoMode && !isAuthenticatedAdmin) {
+        APP.pendingCancelOrderId = orderId;
+        openPinModal();
+        return;
+    }
+    await performCancelOrder(orderId);
+}
+
+async function performCancelOrder(orderId) {
     if (!confirm(`Bạn có chắc muốn HỦY đơn ${orderId}?\nĐơn hàng sẽ bị ghi chú là CANCELLED trong Google Sheets và không tính vào doanh thu.`)) return;
 
     try {
@@ -1091,4 +1115,4 @@ function reprintOrder(orderId) {
 }
 function previewCheckout(){if(!APP.cartItems.length)return showToast('Cart is empty','error');const v=Number(document.getElementById('vatSelect').value),s=calcSubtotal(),t=calcTax(s,v);APP.pendingCheckout={orderId:generateOrderId(),timestamp:new Date().toISOString(),vatPercent:v,subtotal:s,taxAmount:t,grandTotal:calcGrandTotal(s,t)};buildReceipt(APP.pendingCheckout.orderId,APP.pendingCheckout.timestamp,s,v,t,APP.pendingCheckout.grandTotal);document.getElementById('btnConfirmCheckout').hidden=false;document.getElementById('btnPrintReceipt').hidden=true;document.getElementById('receiptModal').classList.add('active')}
 
-async function confirmCheckout(){const p=APP.pendingCheckout;if(!p)return;const b=document.getElementById('btnConfirmCheckout');b.disabled=true;b.textContent='Saving...';APP.pendingCheckout=null;await checkout();if(APP.resetCartOnReceiptClose){b.hidden=true;document.getElementById('btnPrintReceipt').hidden=false}else{APP.pendingCheckout=p;b.disabled=false;b.textContent='Confirm payment';showToast('Could not save order','error')}}
+async function confirmCheckout(){const p=APP.pendingCheckout;if(!p)return;const b=document.getElementById('btnConfirmCheckout');b.disabled=true;b.textContent='Đang lưu...';APP.pendingCheckout=null;await checkout();if(APP.resetCartOnReceiptClose){b.hidden=true;document.getElementById('btnPrintReceipt').hidden=false}else{APP.pendingCheckout=p;b.disabled=false;b.textContent='Xác nhận thanh toán';showToast('Lưu đơn thất bại','error')}}

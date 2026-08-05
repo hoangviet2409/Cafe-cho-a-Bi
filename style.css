@@ -847,6 +847,12 @@ body {
 }
 
 /* Buttons */
+/* [hidden] phải nằm SAU và có !important, nếu không display:flex ở dưới sẽ đè mất,
+   khiến các nút dùng thuộc tính hidden (vd: btnConfirmCheckout, btnPrintReceipt) không thực sự ẩn đi */
+[hidden] {
+    display: none !important;
+}
+
 .btn-primary {
     display: flex;
     align-items: center;
