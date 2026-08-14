@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cafe-pos-v11'; // Đổi tên cache để update
+const CACHE_NAME = 'cafe-pos-v12'; // Đổi tên cache để update
 const urlsToCache = [
     './',
     './index.html',

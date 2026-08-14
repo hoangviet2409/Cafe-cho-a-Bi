@@ -1521,12 +1521,12 @@ async function loadHistoryFromSheets() {
 
         const data = await gsFetch('getHistory', { days: APP.historyFilterDays });
         if (data && data.success) {
-            APP.history.orders = data.orders.map(o => ({
+            APP.history.orders = (data.orders || []).filter(o => String(o[0] || '').trim().toLowerCase() !== 'order_id').map(o => ({
                 order_id: String(o[0]), timestamp: String(o[1]), sub_total: Number(o[2]),
                 tax_percent: Number(o[3]), tax_amount: Number(o[4]), grand_total: Number(o[5]),
                 status: o[6] ? String(o[6]) : 'ACTIVE' // cột status mới
             }));
-            APP.history.items = data.items.map(i => ({
+            APP.history.items = (data.items || []).filter(i => String(i[0] || '').trim().toLowerCase() !== 'order_id').map(i => ({
                 order_id: String(i[0]), item_name: String(i[1]), quantity: Number(i[2]),
                 unit_price: Number(i[3]), line_total: Number(i[4])
             }));
