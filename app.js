@@ -18,10 +18,13 @@ const APP = {
         items: []
     },
     historyFilterDays: 1, // Default: 1 (Hôm nay), 7 (7 ngày), 0 (Tất cả)
+    historySearchQuery: '',
+    adminFilterStatus: 'all',
     deleteTargetId: null,
     orderRowIndex: null,  // for GSheets row tracking
     resetCartOnReceiptClose: false,
     pendingCancelOrderId: null, // đơn đang chờ hủy sau khi xác thực PIN
+    pendingCheckout: null,
 };
 
 const STORAGE_KEYS = {
@@ -34,6 +37,11 @@ const STORAGE_KEYS = {
 
 const WRITE_VERIFY_ATTEMPTS = 6;
 const WRITE_VERIFY_DELAY_MS = 700;
+
+function createOperationId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
 
 // Demo menu data (khi không có Google Sheets)
 const DEMO_MENU = [
@@ -162,10 +170,18 @@ function connectGSheets() {
     const url = document.getElementById('inputScriptUrl').value.trim();
     const apiKey = document.getElementById('inputApiKey')?.value.trim() || '';
     if (!url) { showToast('Vui lòng nhập Script URL', 'error'); return; }
+    if (!apiKey) { showToast('Vui lòng nhập API Key', 'error'); return; }
+    try {
+        const parsedUrl = new URL(url);
+        if (!/^https?:$/.test(parsedUrl.protocol)) throw new Error('Invalid protocol');
+    } catch {
+        showToast('Script URL không hợp lệ', 'error');
+        return;
+    }
 
-    // Save URL to localStorage
+    // Chỉ lưu URL; API Key giữ trong memory để không lưu plaintext lâu dài.
     localStorage.setItem(STORAGE_KEYS.scriptUrl, url);
-    localStorage.setItem(STORAGE_KEYS.apiKey, apiKey);
+    localStorage.removeItem(STORAGE_KEYS.apiKey);
 
     APP.scriptUrl = url;
     APP.apiKey = apiKey;
@@ -201,7 +217,7 @@ function setStatusBadge(type, text) {
 async function gsFetch(action, payload = {}) {
     if (APP.demoMode) return { success: true };
     try {
-        if (action === 'getMenu' || action === 'getHistory' || action === 'getOrder') {
+        if (action === 'getMenu' || action === 'getHistory' || action === 'getOrder' || action === 'getOperationStatus') {
             // GET request: Apps Script trả về JSON qua doGet, không bị CORS
             const url = new URL(APP.scriptUrl);
             url.searchParams.set('action', action);
@@ -213,6 +229,9 @@ async function gsFetch(action, payload = {}) {
             if (action === 'getOrder' && payload.order_id) {
                 url.searchParams.set('order_id', payload.order_id);
             }
+            if (action === 'getOperationStatus' && payload.operation_id) {
+                url.searchParams.set('operation_id', payload.operation_id);
+            }
             const res = await fetch(url.toString(), { method: 'GET' });
             const data = await res.json();
             if (data && data.success === false) {
@@ -220,9 +239,10 @@ async function gsFetch(action, payload = {}) {
             }
             return data;
         } else {
+            const operationId = createOperationId();
             const body = APP.apiKey
-                ? { action, key: APP.apiKey, ...payload }
-                : { action, ...payload };
+                ? { action, key: APP.apiKey, ...payload, operation_id: operationId }
+                : { action, ...payload, operation_id: operationId };
             if (['appendMenuItem', 'updateMenuItem', 'deleteMenuItem', 'cancelOrder'].includes(action)) body.admin_pin = APP.adminPin;
 
             // POST no-cors: Apps Script nhận dữ liệu, sau đó app xác minh bằng GET.
@@ -232,12 +252,24 @@ async function gsFetch(action, payload = {}) {
                 headers: { 'Content-Type': 'text/plain' },
                 body: JSON.stringify(body),
             });
-            return { success: true, pendingVerification: true };
+            return { success: true, pendingVerification: true, operationId };
         }
     } catch (e) {
         console.error('GSheets error:', e);
         throw e;
     }
+}
+
+async function verifyWriteAccepted(operationId) {
+    if (!operationId) return false;
+    for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
+        const data = await gsFetch('getOperationStatus', { operation_id: operationId });
+        if (data && data.status === 'SUCCESS') return true;
+        if (data && data.status === 'FAILED') throw new Error(data.error || 'Server rejected the operation');
+        await sleep(WRITE_VERIFY_DELAY_MS);
+    }
+    // Không chặn luồng cũ nếu server xử lý xong nhưng status bị trễ/mất.
+    return false;
 }
 
 function sleep(ms) {
@@ -311,9 +343,10 @@ async function verifyMenuMutation(predicate, errorMessage) {
 async function verifyOrderWritten(orderId, expectedItems) {
     for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
         const data = await gsFetch('getOrder', { order_id: orderId });
-        if (data && data.order && Array.isArray(data.items) && data.items.length === expectedItems.length
+        if (data && data.order && String(data.order[6]) === 'ACTIVE'
+            && Array.isArray(data.items) && data.items.length === expectedItems.length
             && data.items.every((item, index) => Number(item[2]) === expectedItems[index].quantity
-                && Number(item[3]) === expectedItems[index].unit_price && String(item[5]) === 'ACTIVE')) return data;
+                && String(item[5]) === 'ACTIVE')) return data;
         await sleep(WRITE_VERIFY_DELAY_MS);
     }
     throw new Error('Không thể xác minh đơn đã ghi vào Google Sheets');
@@ -375,11 +408,19 @@ async function loadMenuFromSheets(forceRefresh = false) {
 // ============================================================
 // 5. MENU GRID (POS Page)
 // ============================================================
+function normalizeSearchText(value) {
+    return String(value || '')
+        .toLocaleLowerCase('vi-VN')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+}
+
 function renderMenuGrid(items, filterText = '') {
     const grid = document.getElementById('menuGrid');
+    const normalizedFilter = normalizeSearchText(filterText);
     const active = items.filter(i =>
         i.status === 'Active' &&
-        (!filterText || i.name.toLowerCase().includes(filterText.toLowerCase()))
+        (!normalizedFilter || normalizeSearchText(i.name).includes(normalizedFilter))
     );
 
     if (active.length === 0) {
@@ -439,7 +480,12 @@ function addToCart(id, name, price) {
  */
 function increaseQty(id) {
     const item = APP.cartItems.find(i => i.id === id);
-    if (item) item.quantity += 1;
+    if (!item) return;
+    if (item.quantity >= 100) {
+        showToast('Mỗi món tối đa 100 phần trong một đơn', 'info');
+        return;
+    }
+    item.quantity += 1;
     renderCart();
     updateCalc();
 }
@@ -471,8 +517,16 @@ function removeFromCart(id) {
 function renderCart() {
     const cartList = document.getElementById('cartList');
     const cartCount = document.getElementById('cartCount');
+    const cartItemsSummary = document.getElementById('cartItemsSummary');
+    const cartTotalSummary = document.getElementById('cartTotalSummary');
+    const clearCartBtn = document.getElementById('btnClearCart');
     const totalItems = APP.cartItems.reduce((s, i) => s + i.quantity, 0);
+    const subtotal = calcSubtotal();
+
     cartCount.textContent = `${totalItems} món`;
+    cartItemsSummary.textContent = totalItems > 0 ? `${totalItems} món trong giỏ` : 'Giỏ hàng trống';
+    cartTotalSummary.textContent = formatCurrency(subtotal);
+    clearCartBtn.disabled = totalItems === 0;
 
     if (APP.cartItems.length === 0) {
         cartList.innerHTML = `
@@ -486,17 +540,29 @@ function renderCart() {
 
     cartList.innerHTML = APP.cartItems.map(item => `
     <div class="cart-item" id="cart-${escHtml(item.id)}">
-      <span class="cart-item-name" title="${escHtml(item.name)}">${escHtml(item.name)}</span>
+      <div>
+        <span class="cart-item-name" title="${escHtml(item.name)}">${escHtml(item.name)}</span>
+        <span class="cart-item-note">${item.quantity} x ${formatCurrency(item.price)}</span>
+      </div>
       <div class="cart-item-controls">
         <button class="qty-btn minus" data-cart-action="decrease" data-cart-id="${escHtml(item.id)}" title="Giảm">−</button>
         <span class="qty-num">${item.quantity}</span>
         <button class="qty-btn" data-cart-action="increase" data-cart-id="${escHtml(item.id)}" title="Tăng">+</button>
+        <button class="qty-btn btn-remove" data-cart-action="remove" data-cart-id="${escHtml(item.id)}" title="Xóa">×</button>
       </div>
       <span class="cart-item-price">${formatCurrency(item.price * item.quantity)}</span>
     </div>
   `).join('');
 
     document.getElementById('btnCheckout').disabled = false;
+}
+
+function clearCart() {
+    if (APP.cartItems.length === 0) return;
+    APP.cartItems = [];
+    renderCart();
+    updateCalc();
+    showToast('Đã xóa toàn bộ giỏ hàng', 'info');
 }
 
 function pulseCartBadge() {
@@ -544,24 +610,34 @@ function updateCalc() {
 // ============================================================
 // 8. CHECKOUT ACTION FLOW  (ghi tuần tự vào 2 tab Google Sheets)
 // ============================================================
-async function checkout() {
-    if (APP.cartItems.length === 0) { showToast('Giỏ hàng đang trống!', 'error'); return; }
+async function checkout(orderData = null) {
+    const pending = orderData || APP.pendingCheckout;
+    if (!pending && APP.cartItems.length === 0) { showToast('Giỏ hàng đang trống!', 'error'); return; }
 
     const btn = document.getElementById('btnCheckout');
+    const confirmBtn = document.getElementById('btnConfirmCheckout');
     btn.disabled = true;
+    if (confirmBtn) confirmBtn.disabled = true;
     btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="animation:spin 0.8s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Đang xử lý...`;
 
     try {
-        // BƯỚC 1: Khởi tạo order_id
-        const orderId = generateOrderId();
-        const now = new Date().toISOString();
+        const data = pending || (() => {
+            const orderId = generateOrderId();
+            const now = new Date().toISOString();
+            const vatPercent = Number(document.getElementById('vatSelect').value);
+            const subtotal = calcSubtotal();
+            const taxAmount = calcTax(subtotal, vatPercent);
+            const grandTotal = calcGrandTotal(subtotal, taxAmount);
+            return { orderId, timestamp: now, vatPercent, subtotal, taxAmount, grandTotal };
+        })();
 
-        const vatPercent = Number(document.getElementById('vatSelect').value);
-        const subtotal = calcSubtotal();
-        const taxAmount = calcTax(subtotal, vatPercent);
-        const grandTotal = calcGrandTotal(subtotal, taxAmount);
+        const orderId = data.orderId;
+        const now = data.timestamp;
+        const vatPercent = data.vatPercent;
+        const subtotal = data.subtotal;
+        const taxAmount = data.taxAmount;
+        const grandTotal = data.grandTotal;
 
-        // BƯỚC 2: Bulk Insert Order & Items
         if (!APP.demoMode) {
             const orderRow = {
                 order_id: orderId,
@@ -572,7 +648,14 @@ async function checkout() {
                 grand_total: grandTotal,
             };
 
-            const itemRows = APP.cartItems.map(item => ({
+            const itemSnapshot = data.items || APP.cartItems.map(item => ({
+                id: item.id,
+                name: item.name,
+                quantity: item.quantity,
+                price: item.price,
+            }));
+
+            const itemRows = itemSnapshot.map(item => ({
                 order_id: orderId,
                 menu_id: item.id,
                 item_name: item.name,
@@ -581,29 +664,44 @@ async function checkout() {
                 line_total: item.quantity * item.price,
             }));
 
-            const r2 = await gsFetch('checkoutOrder', {
+            const writeResult = await gsFetch('checkoutOrder', {
                 orderRow: orderRow,
                 itemRows: itemRows
             });
+            await verifyWriteAccepted(writeResult.operationId);
 
-            if (!r2.success) throw new Error(r2.error || 'Lỗi ghi dữ liệu thanh toán');
-            await verifyOrderWritten(orderId, itemRows);
+            const verified = await verifyOrderWritten(orderId, itemRows);
+            const serverOrder = verified.order;
+            const serverItems = verified.items.map(item => ({
+                name: String(item[1]),
+                quantity: Number(item[2]),
+                price: Number(item[3])
+            }));
+            data.orderId = String(serverOrder[0]);
+            data.timestamp = String(serverOrder[1]);
+            data.subtotal = Number(serverOrder[2]);
+            data.vatPercent = Number(serverOrder[3]);
+            data.taxAmount = Number(serverOrder[4]);
+            data.grandTotal = Number(serverOrder[5]);
+            data.items = serverItems;
         }
 
-        // BƯỚC 4: Preview Hóa Đơn & Print
-        buildReceipt(orderId, now, subtotal, vatPercent, taxAmount, grandTotal);
+        const receiptItems = data.items || APP.cartItems;
+        buildReceipt(data.orderId, data.timestamp, data.subtotal, data.vatPercent, data.taxAmount, data.grandTotal, receiptItems);
         APP.resetCartOnReceiptClose = true;
+        APP.pendingCheckout = null;
         document.getElementById('receiptModal').classList.add('active');
+        if (confirmBtn) confirmBtn.hidden = true;
+        document.getElementById('btnPrintReceipt').hidden = false;
 
-        // Reset btn trạng thái (việc reset giỏ hàng sẽ làm khi đóng hóa đơn)
         btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> XUẤT HÓA ĐƠN`;
         btn.disabled = true;
-
     } catch (err) {
         console.error('Checkout error:', err);
         showToast(`❌ Lỗi: ${friendlyErrorMessage(err)}`, 'error', 6000);
         btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg> XUẤT HÓA ĐƠN`;
         btn.disabled = false;
+        if (confirmBtn) confirmBtn.disabled = false;
     }
 }
 
@@ -613,20 +711,28 @@ async function checkout() {
 function renderMenuTable() {
     const tbody = document.getElementById('menuTableBody');
     const items = APP.menuItems;
+    const filterValue = normalizeSearchText(document.getElementById('adminSearch')?.value.trim());
+    const statusFilter = document.getElementById('adminStatusFilter')?.value || 'all';
+
+    const filteredItems = items.filter(item => {
+        const matchesText = !filterValue || normalizeSearchText(item.name).includes(filterValue) || normalizeSearchText(item.id).includes(filterValue);
+        const matchesStatus = statusFilter === 'all' || item.status === statusFilter;
+        return matchesText && matchesStatus;
+    });
 
     // Update summary cards
-    document.getElementById('totalItems').textContent = items.length;
-    document.getElementById('activeItems').textContent = items.filter(i => i.status === 'Active').length;
-    document.getElementById('inactiveItems').textContent = items.filter(i => i.status === 'Inactive').length;
+    document.getElementById('totalItems').textContent = filteredItems.length;
+    document.getElementById('activeItems').textContent = filteredItems.filter(i => i.status === 'Active').length;
+    document.getElementById('inactiveItems').textContent = filteredItems.filter(i => i.status === 'Inactive').length;
 
-    if (items.length === 0) {
+    if (filteredItems.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
-      Chưa có món nào. Nhấn "Thêm món mới" để bắt đầu.
+      Không tìm thấy món phù hợp với bộ lọc.
     </td></tr>`;
         return;
     }
 
-    tbody.innerHTML = items.map(item => `
+    tbody.innerHTML = filteredItems.map(item => `
     <tr>
       <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace">${escHtml(item.id)}</td>
       <td style="font-weight:600">${item.emoji || getEmoji(item.name)} ${escHtml(item.name)}</td>
@@ -654,6 +760,17 @@ function openAddModal() {
     document.getElementById('inputItemPrice').value = '';
     document.getElementById('inputItemStatus').value = 'Active';
     document.getElementById('itemModal').classList.add('active');
+}
+
+function filterAdminMenu(value) {
+    const searchField = document.getElementById('adminSearch');
+    if (searchField) searchField.value = value;
+    renderMenuTable();
+}
+
+function filterHistory(value) {
+    APP.historySearchQuery = String(value || '').trim().toLowerCase();
+    renderHistoryTable();
 }
 
 // ---- Edit Item ----
@@ -687,7 +804,8 @@ async function saveItem() {
         if (!item) return;
         if (!APP.demoMode) {
             try {
-                await gsFetch('updateMenuItem', { id: editId, name, price, status });
+                const writeResult = await gsFetch('updateMenuItem', { id: editId, name, price, status });
+                await verifyWriteAccepted(writeResult.operationId);
                 await verifyMenuMutation(
                     items => items.some(i => i.id === editId && i.name === name && i.price === price && i.status === status),
                     'Không thể xác minh món đã được cập nhật'
@@ -703,7 +821,8 @@ async function saveItem() {
         const newItem = { id: newId, name, price, status, emoji: getEmoji(name) };
         if (!APP.demoMode) {
             try {
-                await gsFetch('appendMenuItem', { row: { id: newId, name, price, status } });
+                const writeResult = await gsFetch('appendMenuItem', { row: { id: newId, name, price, status } });
+                await verifyWriteAccepted(writeResult.operationId);
                 await verifyMenuMutation(
                     items => items.some(i => i.id === newId && i.name === name && i.price === price && i.status === status),
                     'Không thể xác minh món mới trong Google Sheets'
@@ -743,7 +862,8 @@ async function confirmDelete() {
 
     if (!APP.demoMode) {
         try {
-            await gsFetch('updateMenuItem', { id, name: item.name, price: item.price, status: 'Inactive' });
+            const writeResult = await gsFetch('updateMenuItem', { id, name: item.name, price: item.price, status: 'Inactive' });
+            await verifyWriteAccepted(writeResult.operationId);
             await verifyMenuMutation(
                 items => items.some(i => i.id === id && i.status === 'Inactive'),
                 'Không thể xác minh món đã được xóa'
@@ -815,6 +935,7 @@ function handleDynamicClick(e) {
         const id = cartButton.dataset.cartId;
         if (cartButton.dataset.cartAction === 'increase') increaseQty(id);
         if (cartButton.dataset.cartAction === 'decrease') decreaseQty(id);
+        if (cartButton.dataset.cartAction === 'remove') removeFromCart(id);
         return;
     }
 
@@ -860,6 +981,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
+        const typingTarget = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+        if ((e.key === '/' || (e.key.toLowerCase() === 'k' && (e.ctrlKey || e.metaKey))) && !typingTarget) {
+            const activeSearch = document.querySelector('.page.active .search-input');
+            if (activeSearch) {
+                e.preventDefault();
+                activeSearch.focus();
+            }
+            return;
+        }
         if (e.key === 'Escape') {
             document.getElementById('itemModal').classList.remove('active');
             document.getElementById('deleteModal').classList.remove('active');
@@ -891,12 +1021,10 @@ document.getElementById('pinInput')?.addEventListener('keyup', (e) => {
 // Kiểm tra Local Storage xem có Script URL nào đã lưu chưa
 window.addEventListener('DOMContentLoaded', () => {
     const savedUrl = localStorage.getItem(STORAGE_KEYS.scriptUrl);
-    const savedApiKey = localStorage.getItem(STORAGE_KEYS.apiKey) || '';
-    const apiKeyInput = document.getElementById('inputApiKey');
-    if (apiKeyInput) apiKeyInput.value = savedApiKey;
+    // API Key không còn được tự động nạp từ localStorage.
+    localStorage.removeItem(STORAGE_KEYS.apiKey);
     if (savedUrl) {
         document.getElementById('inputScriptUrl').value = savedUrl;
-        connectGSheets(); // Tự động kết nối nếu đã lưu
     }
 });
 
@@ -904,7 +1032,7 @@ window.addEventListener('DOMContentLoaded', () => {
 // 12. RECEIPT LOGIC
 // ============================================================
 
-function buildReceipt(orderId, timestamp, subtotal, vatPercent, taxAmount, grandTotal) {
+function buildReceipt(orderId, timestamp, subtotal, vatPercent, taxAmount, grandTotal, receiptItems = APP.cartItems) {
     document.getElementById('rOrderId').textContent = orderId;
     const dateObj = new Date(timestamp);
     const dateStr = dateObj.toLocaleDateString('vi-VN') + ' ' + dateObj.toLocaleTimeString('vi-VN');
@@ -925,7 +1053,7 @@ function buildReceipt(orderId, timestamp, subtotal, vatPercent, taxAmount, grand
 
     // Build items
     const rItems = document.getElementById('rItems');
-    rItems.innerHTML = APP.cartItems.map(item => `
+    rItems.innerHTML = receiptItems.map(item => `
         <div class="receipt-item-row">
             <div class="receipt-item-name">
                 <div>${escHtml(item.name)}</div>
@@ -1018,9 +1146,17 @@ function renderHistoryTable() {
     // Summary follows the selected history range and excludes cancelled orders.
     let totalRevenue = 0;
     let totalOrdersCount = 0;
+    let cancelledCount = 0;
+    const query = APP.historySearchQuery || '';
+    const filteredOrders = orders.filter(order => {
+        if (!query) return true;
+        return String(order.order_id).toLowerCase().includes(query);
+    });
 
-    orders.forEach(o => {
-        if (o.status !== 'CANCELLED') {
+    filteredOrders.forEach(o => {
+        if (o.status === 'CANCELLED') {
+            cancelledCount++;
+        } else {
             totalRevenue += o.grand_total;
             totalOrdersCount++;
         }
@@ -1028,15 +1164,17 @@ function renderHistoryTable() {
 
     document.getElementById('historyTotalRevenue').textContent = formatCurrency(totalRevenue);
     document.getElementById('historyTotalOrders').textContent = totalOrdersCount;
+    const cancelledEl = document.getElementById('historyCancelledOrders');
+    if (cancelledEl) cancelledEl.textContent = cancelledCount;
 
-    if (orders.length === 0) {
+    if (filteredOrders.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
             Chưa có hóa đơn nào được lưu.
         </td></tr>`;
         return;
     }
 
-    tbody.innerHTML = orders.map(o => {
+    tbody.innerHTML = filteredOrders.map(o => {
         const d = new Date(o.timestamp);
         const dateStr = d.toLocaleDateString('vi-VN') + ' ' + d.toLocaleTimeString('vi-VN');
         const isCancelled = o.status === 'CANCELLED';
@@ -1044,8 +1182,11 @@ function renderHistoryTable() {
         const priceStyle = isCancelled
             ? 'text-decoration:line-through;color:var(--red);'
             : 'color:var(--accent);font-weight:700;';
+        const statusLabel = isCancelled
+            ? '<span class="badge badge-inactive">Đã hủy</span>'
+            : '<span class="badge badge-active">Hoạt động</span>';
         const actionBtns = isCancelled
-            ? `<span style="color:var(--red);font-size:0.78rem;font-weight:600;">✕ Đã hủy</span>`
+            ? `<button class="action-btn" data-history-action="reprint" data-order-id="${escHtml(o.order_id)}">🖨️ In lại</button>`
             : `<button class="action-btn" data-history-action="reprint" data-order-id="${escHtml(o.order_id)}">🖨️ In lại</button>
                <button class="action-btn" style="margin-left:6px;color:var(--red);border-color:rgba(239,68,68,0.4);" data-history-action="cancel" data-order-id="${escHtml(o.order_id)}">✕ Hủy</button>`;
         return `
@@ -1053,6 +1194,7 @@ function renderHistoryTable() {
               <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace;font-weight:bold">${escHtml(o.order_id)}</td>
               <td style="font-size:0.85rem">${dateStr}</td>
               <td style="${priceStyle}">${formatCurrency(o.grand_total)}</td>
+              <td>${statusLabel}</td>
               <td>${actionBtns}</td>
             </tr>
         `;
@@ -1077,7 +1219,8 @@ async function performCancelOrder(orderId) {
 
     try {
         if (!APP.demoMode) {
-            await gsFetch('cancelOrder', { order_id: orderId });
+            const writeResult = await gsFetch('cancelOrder', { order_id: orderId });
+            await verifyWriteAccepted(writeResult.operationId);
             await verifyOrderCancelled(orderId);
         }
         // Update local state
@@ -1094,25 +1237,57 @@ function reprintOrder(orderId) {
     const order = APP.history.orders.find(o => o.order_id === orderId);
     if (!order) return showToast('Không tìm thấy hóa đơn', 'error');
 
-    const items = APP.history.items.filter(i => i.order_id === orderId);
-
-    // Tạm thời thay thế APP.cartItems để dùng chung hàm buildReceipt
-    const originalCart = [...APP.cartItems];
-    APP.cartItems = items.map(i => ({
+    const items = APP.history.items.filter(i => i.order_id === orderId).map(i => ({
         name: i.item_name,
         quantity: i.quantity,
         price: i.unit_price
     }));
 
-    buildReceipt(orderId, order.timestamp, order.sub_total, order.tax_percent, order.tax_amount, order.grand_total);
-
-    // Phục hồi giỏ hàng hiện tại
-    APP.cartItems = originalCart;
+    buildReceipt(orderId, order.timestamp, order.sub_total, order.tax_percent, order.tax_amount, order.grand_total, items);
     APP.resetCartOnReceiptClose = false;
     document.getElementById('btnConfirmCheckout').hidden = true;
     document.getElementById('btnPrintReceipt').hidden = false;
     document.getElementById('receiptModal').classList.add('active');
 }
-function previewCheckout(){if(!APP.cartItems.length)return showToast('Cart is empty','error');const v=Number(document.getElementById('vatSelect').value),s=calcSubtotal(),t=calcTax(s,v);APP.pendingCheckout={orderId:generateOrderId(),timestamp:new Date().toISOString(),vatPercent:v,subtotal:s,taxAmount:t,grandTotal:calcGrandTotal(s,t)};buildReceipt(APP.pendingCheckout.orderId,APP.pendingCheckout.timestamp,s,v,t,APP.pendingCheckout.grandTotal);document.getElementById('btnConfirmCheckout').hidden=false;document.getElementById('btnPrintReceipt').hidden=true;document.getElementById('receiptModal').classList.add('active')}
+function previewCheckout() {
+    if (!APP.cartItems.length) return showToast('Giỏ hàng đang trống', 'error');
+    const vatPercent = Number(document.getElementById('vatSelect').value);
+    const subtotal = calcSubtotal();
+    const taxAmount = calcTax(subtotal, vatPercent);
+    APP.pendingCheckout = {
+        orderId: generateOrderId(),
+        timestamp: new Date().toISOString(),
+        vatPercent: vatPercent,
+        subtotal: subtotal,
+        taxAmount: taxAmount,
+        grandTotal: calcGrandTotal(subtotal, taxAmount),
+        items: APP.cartItems.map(item => ({
+            id: item.id,
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price
+        }))
+    };
+    buildReceipt(APP.pendingCheckout.orderId, APP.pendingCheckout.timestamp, subtotal, vatPercent, taxAmount, APP.pendingCheckout.grandTotal, APP.pendingCheckout.items);
+    document.getElementById('btnConfirmCheckout').hidden = false;
+    document.getElementById('btnConfirmCheckout').disabled = false;
+    document.getElementById('btnConfirmCheckout').textContent = '✔️ Xác nhận thanh toán';
+    document.getElementById('btnPrintReceipt').hidden = true;
+    document.getElementById('receiptModal').classList.add('active');
+}
 
-async function confirmCheckout(){const p=APP.pendingCheckout;if(!p)return;const b=document.getElementById('btnConfirmCheckout');b.disabled=true;b.textContent='Đang lưu...';APP.pendingCheckout=null;await checkout();if(APP.resetCartOnReceiptClose){b.hidden=true;document.getElementById('btnPrintReceipt').hidden=false}else{APP.pendingCheckout=p;b.disabled=false;b.textContent='Xác nhận thanh toán';showToast('Lưu đơn thất bại','error')}}
+async function confirmCheckout() {
+    if (!APP.pendingCheckout) return;
+    const btn = document.getElementById('btnConfirmCheckout');
+    btn.disabled = true;
+    btn.textContent = 'Đang lưu...';
+    await checkout(APP.pendingCheckout);
+    if (APP.resetCartOnReceiptClose) {
+        btn.hidden = true;
+        document.getElementById('btnPrintReceipt').hidden = false;
+    } else {
+        btn.disabled = false;
+        btn.textContent = '✔️ Xác nhận thanh toán';
+        showToast('Lưu đơn thất bại', 'error');
+    }
+}

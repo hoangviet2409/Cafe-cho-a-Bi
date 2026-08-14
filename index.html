@@ -25,7 +25,10 @@
     <header class="app-header">
         <div class="header-brand">
             <span class="brand-icon">☕</span>
-            <span class="brand-name">Cafe POS</span>
+            <span class="brand-copy">
+                <span class="brand-name">Cafe POS</span>
+                <span class="brand-subtitle">Bán hàng & vận hành</span>
+            </span>
         </div>
         <nav class="header-nav">
             <button id="btnPOS" class="nav-btn active" onclick="showPage('pos')">
@@ -70,7 +73,7 @@
                     autocomplete="off" spellcheck="false" />
             </div>
             <div class="form-group">
-                <label>API Key (tùy chọn)</label>
+            <label>API Key <span class="required">*</span></label>
                 <input id="inputApiKey" type="password" placeholder="Đặt cùng API_KEY trong apps-script.js"
                     autocomplete="off" spellcheck="false" />
             </div>
@@ -113,6 +116,13 @@
             <div class="panel-header">
                 <h2>🛒 Giỏ hàng</h2>
                 <span id="cartCount" class="cart-badge">0 món</span>
+            </div>
+            <div class="cart-actions">
+                <div class="cart-summary">
+                    <span id="cartItemsSummary">Giỏ hàng trống</span>
+                    <span id="cartTotalSummary">0 ₫</span>
+                </div>
+                <button id="btnClearCart" class="btn-secondary btn-sm" onclick="clearCart()" disabled>🧹 Xóa giỏ hàng</button>
             </div>
 
             <!-- Cart Items -->
@@ -161,16 +171,24 @@
     <!-- ============== PAGE: ADMIN ============== -->
     <main id="pageAdmin" class="page">
         <div class="admin-container">
-            <div class="admin-header">
+            <div class="admin-header" style="flex-wrap: wrap; gap: 12px;">
                 <h2>🍽️ Quản lý Thực đơn</h2>
-                <button class="btn-primary" onclick="openAddModal()">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                        stroke-width="2.5">
-                        <line x1="12" y1="5" x2="12" y2="19" />
-                        <line x1="5" y1="12" x2="19" y2="12" />
-                    </svg>
-                    Thêm món mới
-                </button>
+                <div style="display:flex; gap:10px; flex-wrap: wrap; align-items:center;">
+                    <input id="adminSearch" type="text" class="search-input" placeholder="Tìm món theo tên hoặc mã..." oninput="filterAdminMenu(this.value)" autocomplete="off" spellcheck="false" style="min-width:220px;" />
+                    <select id="adminStatusFilter" class="vat-select" onchange="filterAdminMenu(document.getElementById('adminSearch').value)">
+                        <option value="all">Tất cả trạng thái</option>
+                        <option value="Active">Đang bán</option>
+                        <option value="Inactive">Tạm nghỉ</option>
+                    </select>
+                    <button class="btn-primary" onclick="openAddModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2.5">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                        Thêm món mới
+                    </button>
+                </div>
             </div>
 
             <!-- Summary Cards -->
@@ -239,6 +257,7 @@
                         </svg>
                         Tải lại
                     </button>
+                    <input id="historySearch" type="text" class="search-input" placeholder="Tìm mã đơn..." oninput="filterHistory(this.value)" autocomplete="off" spellcheck="false" style="min-width:200px;" />
                 </div>
             </div>
 
@@ -258,6 +277,13 @@
                         <div class="summary-label">Tổng số đơn</div>
                     </div>
                 </div>
+                <div class="summary-card">
+                    <div class="summary-icon">🚫</div>
+                    <div>
+                        <div class="summary-value" id="historyCancelledOrders">0</div>
+                        <div class="summary-label">Đơn đã hủy</div>
+                    </div>
+                </div>
             </div>
 
             <!-- History Table -->
@@ -268,6 +294,7 @@
                             <th>Mã đơn (Order ID)</th>
                             <th>Thời gian</th>
                             <th>Thành tiền (Grand Total)</th>
+                            <th>Trạng thái</th>
                             <th>Thao tác</th>
                         </tr>
                     </thead>
@@ -286,7 +313,7 @@
             </div>
             <div class="form-group" style="margin-top:16px;">
                 <input type="password" id="pinInput" style="text-align:center; font-size:1.5rem; letter-spacing:8px;"
-                    maxlength="4">
+                    minlength="4" autocomplete="off">
             </div>
             <div class="modal-actions" style="justify-content:center; margin-top:24px;">
                 <button class="btn-secondary" onclick="closePinModal()">Hủy</button>

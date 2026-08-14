@@ -19,7 +19,7 @@
 
 ## Bảo mật bắt buộc
 - Trước khi Deploy, thay `API_KEY` và `ADMIN_PIN` trong `apps-script.js` bằng hai giá trị riêng, khó đoán. Không dùng giá trị mẫu `REPLACE_...`.
-- Nhập đúng **API Key** khi kết nối app (khớp `API_KEY` trong `apps-script.js`) — nếu sai, app sẽ báo lỗi rõ ràng khi tải thực đơn thay vì chỉ hiện "không kết nối được".
+- Nhập đúng **API Key** khi kết nối app (khớp `API_KEY` trong `apps-script.js`). API Key là bắt buộc; ứng dụng chỉ ghi nhớ Script URL, không lưu API Key vào `localStorage`.
 - Khi vào trang Admin, app chỉ hỏi PIN như một lớp chặn nhẹ trên giao diện — PIN thật sự luôn được **Apps Script kiểm tra lại** mỗi khi bạn lưu/sửa/xóa món hoặc hủy đơn. Chỉ cần nhớ và nhập đúng `ADMIN_PIN` đã đặt trong `apps-script.js`; không còn bản sao PIN nào khác trong code cần sửa theo (bản trước có PIN hardcode `1234` trong `app.js`, dễ bị quên đồng bộ khi đổi PIN — bản này đã bỏ).
 - Không chia sẻ URL Web App, API key hoặc PIN ra ngoài gia đình. Sao lưu Google Sheet định kỳ trên Drive.
 - Món đã bán nên chuyển sang Inactive; không xóa để bảo toàn lịch sử.
