@@ -927,6 +927,18 @@ function pulseCartBadge() {
     setTimeout(() => badge.style.transform = '', 200);
 }
 
+function toggleMobileCart(forceOpen) {
+    const panel = document.getElementById('mobileCartPanel');
+    const toggle = document.getElementById('btnMobileCartToggle');
+    if (!panel || !toggle || !window.matchMedia('(max-width: 700px)').matches) return;
+    const shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : !panel.classList.contains('mobile-expanded');
+    panel.classList.toggle('mobile-expanded', shouldOpen);
+    document.body.classList.toggle('cart-sheet-open', shouldOpen);
+    toggle.textContent = shouldOpen ? 'Thu gọn' : 'Mở giỏ';
+    toggle.setAttribute('aria-expanded', String(shouldOpen));
+    if (shouldOpen) document.getElementById('cartList')?.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 // ============================================================
 // 7. CALCULATION FORMULAS
 // ============================================================
@@ -1384,6 +1396,14 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.addEventListener('click', handleDynamicClick);
     document.addEventListener('keydown', handleDynamicKeydown);
+    window.addEventListener('resize', () => {
+        if (!window.matchMedia('(max-width: 700px)').matches) {
+            document.getElementById('mobileCartPanel')?.classList.remove('mobile-expanded');
+            document.body.classList.remove('cart-sheet-open');
+            const toggle = document.getElementById('btnMobileCartToggle');
+            if (toggle) { toggle.textContent = 'Mở giỏ'; toggle.setAttribute('aria-expanded', 'false'); }
+        }
+    });
 
     // Add CSS spin animation for loading state
     const spinStyle = document.createElement('style');

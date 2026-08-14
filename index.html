@@ -117,10 +117,11 @@
         </section>
 
         <!-- RIGHT: Cart + Checkout -->
-        <section class="pos-right">
+        <section id="mobileCartPanel" class="pos-right">
             <div class="panel-header">
                 <h2>🛒 Giỏ hàng</h2>
                 <span id="cartCount" class="cart-badge">0 món</span>
+                <button id="btnMobileCartToggle" class="mobile-cart-toggle" type="button" onclick="toggleMobileCart()" aria-expanded="false" aria-controls="mobileCartPanel">Mở giỏ</button>
             </div>
             <div class="order-context">
                 <div class="segmented-control">
