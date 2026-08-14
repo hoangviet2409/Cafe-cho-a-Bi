@@ -19,12 +19,31 @@ const APP = {
     },
     historyFilterDays: 1, // Default: 1 (Hôm nay), 7 (7 ngày), 0 (Tất cả)
     historySearchQuery: '',
+    menuCategory: 'all',
     adminFilterStatus: 'all',
     deleteTargetId: null,
     orderRowIndex: null,  // for GSheets row tracking
     resetCartOnReceiptClose: false,
     pendingCancelOrderId: null, // đơn đang chờ hủy sau khi xác thực PIN
     pendingCheckout: null,
+    operational: {
+        tables: [],
+        drafts: [],
+        customers: [],
+        inventory: [],
+        staff: [],
+        currentShift: null,
+    },
+    orderContext: {
+        orderType: 'TAKEAWAY',
+        tableId: '',
+        customerName: 'Khách lẻ',
+        customerPhone: '',
+        note: '',
+        paymentMethod: 'CASH',
+        cashReceived: 0,
+        staffName: '',
+    },
 };
 
 const STORAGE_KEYS = {
@@ -128,7 +147,7 @@ function verifyPin() {
 }
 
 function showPage(page, forceAdmin = false) {
-    if (page === 'admin' && !isAuthenticatedAdmin && !forceAdmin) {
+    if (['admin', 'operations'].includes(page) && !isAuthenticatedAdmin && !forceAdmin) {
         openPinModal();
         return;
     }
@@ -146,6 +165,10 @@ function showPage(page, forceAdmin = false) {
         document.getElementById('pageHistory').classList.add('active');
         document.getElementById('btnHistory').classList.add('active');
         loadHistoryFromSheets(); // Auto load when navigating
+    } else if (page === 'operations') {
+        document.getElementById('pageOperations').classList.add('active');
+        document.getElementById('btnOperations').classList.add('active');
+        loadOperationalData();
     } else {
         document.getElementById('pageAdmin').classList.add('active');
         document.getElementById('btnAdmin').classList.add('active');
@@ -162,8 +185,10 @@ function startDemoMode() {
     closeSetupModal();
     setStatusBadge('demo', '🎮 Demo');
     showToast('Đang chạy chế độ Demo với dữ liệu mẫu', 'info');
+    renderCategoryFilters();
     renderMenuGrid(APP.menuItems);
     renderMenuTable();
+    loadOperationalData();
 }
 
 function connectGSheets() {
@@ -189,6 +214,7 @@ function connectGSheets() {
     closeSetupModal();
     setStatusBadge('online', '● Online');
     loadMenuFromSheets(true);
+    loadOperationalData();
 }
 
 function openSetupModal() {
@@ -205,6 +231,248 @@ function setStatusBadge(type, text) {
     el.textContent = text;
 }
 
+function makeDemoOperations() {
+    if (APP.operational.tables.length) return;
+    APP.operational.tables = Array.from({ length: 8 }, (_, index) => ({
+        table_id: `T${index + 1}`, name: `Bàn ${index + 1}`, status: 'AVAILABLE'
+    }));
+    APP.operational.staff = [{ staff_id: 'S1', name: 'Thu ngân', role: 'Cashier', status: 'ACTIVE' }];
+    APP.operational.inventory = [
+        { item_id: 'I1', name: 'Hạt cà phê', unit: 'kg', quantity: 3, low_stock_threshold: 1 },
+        { item_id: 'I2', name: 'Sữa tươi', unit: 'hộp', quantity: 8, low_stock_threshold: 4 }
+    ];
+}
+
+function applyOperationalData(data) {
+    APP.operational.tables = (data.tables || []).map(row => ({ table_id: String(row[0]), name: String(row[1]), status: String(row[2] || 'AVAILABLE') }));
+    APP.operational.drafts = (data.drafts || []).map(row => ({
+        draft_id: String(row[0]), created_at: String(row[1]), order_type: String(row[3] || 'TAKEAWAY'),
+        table_id: String(row[4] || ''), customer_name: String(row[5] || 'Khách lẻ'), customer_phone: String(row[6] || ''),
+        note: String(row[7] || ''), vat_percent: Number(row[8] || 0), items: JSON.parse(row[9] || '[]')
+    }));
+    APP.operational.customers = (data.customers || []).map(row => ({ customer_id: String(row[0]), name: String(row[1]), phone: String(row[2] || '') }));
+    APP.operational.inventory = (data.inventory || []).map(row => ({ item_id: String(row[0]), name: String(row[1]), unit: String(row[2]), quantity: Number(row[3]), low_stock_threshold: Number(row[4]) }));
+    APP.operational.staff = (data.staff || []).map(row => ({ staff_id: String(row[0]), name: String(row[1]), role: String(row[2]), status: String(row[3]) }));
+    APP.operational.currentShift = data.currentShift ? {
+        shift_id: String(data.currentShift[0]), opened_at: String(data.currentShift[1]), opening_cash: Number(data.currentShift[3]), staff_name: String(data.currentShift[6] || '')
+    } : null;
+    renderOperationalControls();
+    renderOperationsDashboard();
+}
+
+async function loadOperationalData() {
+    if (APP.demoMode) {
+        makeDemoOperations();
+        renderOperationalControls();
+        return;
+    }
+    try {
+        const data = await gsFetch('getOperations');
+        applyOperationalData(data || {});
+    } catch (error) {
+        console.warn('Could not load operational data', error);
+        showToast('Không thể tải bàn, ca làm và đơn tạm', 'info');
+    }
+}
+
+function renderOperationalControls() {
+    const tableSelect = document.getElementById('tableSelect');
+    if (!tableSelect) return;
+    const current = APP.orderContext.tableId;
+    tableSelect.innerHTML = '<option value="">Chọn bàn</option>' + APP.operational.tables
+        .filter(table => table.status !== 'INACTIVE')
+        .map(table => `<option value="${escHtml(table.table_id)}">${escHtml(table.name)}${table.status === 'OCCUPIED' ? ' · đang dùng' : ''}</option>`).join('');
+    tableSelect.value = current;
+    updateOrderContextFields();
+}
+
+function renderOperationsDashboard() {
+    const board = document.getElementById('tableBoard');
+    if (!board) return;
+    board.innerHTML = APP.operational.tables.length ? APP.operational.tables.map(table => `
+        <div class="table-tile ${String(table.status).toLowerCase()}"><strong>${escHtml(table.name)}</strong><small>${table.status === 'OCCUPIED' ? 'Đang phục vụ' : 'Sẵn sàng'}</small></div>`).join('') : '<span class="summary-label">Chưa có bàn. Thêm dữ liệu trong tab Tables.</span>';
+    const shift = document.getElementById('operationsShiftSummary');
+    if (shift) shift.textContent = APP.operational.currentShift
+        ? `${APP.operational.currentShift.staff_name || 'Chưa ghi tên'} · mở từ ${new Date(APP.operational.currentShift.opened_at).toLocaleTimeString('vi-VN')}`
+        : 'Chưa mở ca';
+    const lowStock = APP.operational.inventory.filter(item => item.quantity <= item.low_stock_threshold);
+    const lowStockList = document.getElementById('lowStockList');
+    if (lowStockList) lowStockList.innerHTML = lowStock.length
+        ? lowStock.map(item => `<div>${escHtml(item.name)}<span>${item.quantity} ${escHtml(item.unit)}</span></div>`).join('')
+        : '<span class="summary-label">Tồn kho đang ổn</span>';
+    const customers = document.getElementById('customerList');
+    if (customers) customers.innerHTML = APP.operational.customers.length
+        ? APP.operational.customers.slice(-5).reverse().map(customer => `<div>${escHtml(customer.name)}<span>${escHtml(customer.phone || 'Chưa có SĐT')}</span></div>`).join('')
+        : '<span class="summary-label">Chưa có khách hàng</span>';
+    const staff = document.getElementById('staffList');
+    if (staff) staff.innerHTML = APP.operational.staff.length
+        ? APP.operational.staff.map(person => `<div>${escHtml(person.name)}<span>${escHtml(person.role)}</span></div>`).join('')
+        : '<span class="summary-label">Chưa có nhân viên</span>';
+}
+
+function updateOrderContextFields() {
+    const type = APP.orderContext.orderType;
+    const tableSelect = document.getElementById('tableSelect');
+    const takeaway = document.getElementById('btnTakeaway');
+    const dineIn = document.getElementById('btnDineIn');
+    if (tableSelect) tableSelect.hidden = type !== 'DINE_IN';
+    takeaway?.classList.toggle('active', type === 'TAKEAWAY');
+    dineIn?.classList.toggle('active', type === 'DINE_IN');
+    const customerName = document.getElementById('customerName');
+    const customerPhone = document.getElementById('customerPhone');
+    const note = document.getElementById('orderNote');
+    if (customerName) customerName.value = APP.orderContext.customerName === 'Khách lẻ' ? '' : APP.orderContext.customerName;
+    if (customerPhone) customerPhone.value = APP.orderContext.customerPhone;
+    if (note) note.value = APP.orderContext.note;
+    const payment = document.getElementById('paymentMethod');
+    if (payment) payment.value = APP.orderContext.paymentMethod;
+    updateCashChange();
+}
+
+function setOrderType(type) {
+    APP.orderContext.orderType = type;
+    if (type === 'TAKEAWAY') APP.orderContext.tableId = '';
+    renderOperationalControls();
+}
+
+function setOrderTable(tableId) { APP.orderContext.tableId = tableId; }
+
+function updateOrderContext() {
+    APP.orderContext.customerName = document.getElementById('customerName')?.value.trim() || 'Khách lẻ';
+    APP.orderContext.customerPhone = document.getElementById('customerPhone')?.value.trim() || '';
+    APP.orderContext.note = document.getElementById('orderNote')?.value.trim() || '';
+}
+
+function updatePaymentMethod() {
+    APP.orderContext.paymentMethod = document.getElementById('paymentMethod')?.value || 'CASH';
+    updateCashChange();
+}
+
+function updateCashChange() {
+    const received = Number(document.getElementById('cashReceived')?.value || 0);
+    const grand = calcGrandTotal(calcSubtotal(), calcTax(calcSubtotal(), Number(document.getElementById('vatSelect')?.value || 0)));
+    const isCash = APP.orderContext.paymentMethod === 'CASH';
+    const changeRow = document.getElementById('cashChangeRow');
+    if (changeRow) changeRow.hidden = !isCash || received <= 0;
+    const change = Math.max(0, received - grand);
+    APP.orderContext.cashReceived = received;
+    const display = document.getElementById('cashChangeDisplay');
+    if (display) display.textContent = formatCurrency(change);
+}
+
+function currentDraftPayload() {
+    updateOrderContext();
+    return {
+        draft_id: APP.activeDraftId || '',
+        order_type: APP.orderContext.orderType,
+        table_id: APP.orderContext.tableId,
+        customer_name: APP.orderContext.customerName,
+        customer_phone: APP.orderContext.customerPhone,
+        note: APP.orderContext.note,
+        vat_percent: Number(document.getElementById('vatSelect')?.value || 0),
+        items: APP.cartItems.map(item => ({ id: item.id, name: item.name, price: item.price, quantity: item.quantity }))
+    };
+}
+
+async function saveCurrentDraft() {
+    if (!APP.cartItems.length) return showToast('Chưa có món để giữ đơn', 'error');
+    const draft = currentDraftPayload();
+    try {
+        if (APP.demoMode) {
+            draft.draft_id = draft.draft_id || `DRF-${Date.now()}`;
+            const existing = APP.operational.drafts.findIndex(item => item.draft_id === draft.draft_id);
+            if (existing >= 0) APP.operational.drafts[existing] = draft;
+            else APP.operational.drafts.unshift(draft);
+        } else {
+            const result = await gsFetch('saveDraft', { draft });
+            await verifyWriteAccepted(result.operationId);
+            await loadOperationalData();
+        }
+        APP.activeDraftId = draft.draft_id || APP.activeDraftId;
+        showToast('Đã giữ đơn tạm', 'success');
+    } catch (error) {
+        showToast(`Không thể giữ đơn: ${friendlyErrorMessage(error)}`, 'error', 6000);
+    }
+}
+
+function openDraftModal() {
+    renderDraftList();
+    document.getElementById('draftModal').classList.add('active');
+}
+
+function renderDraftList() {
+    const list = document.getElementById('draftList');
+    if (!list) return;
+    if (!APP.operational.drafts.length) {
+        list.innerHTML = '<div class="cart-empty"><span>📂</span><p>Chưa có đơn tạm</p></div>';
+        return;
+    }
+    list.innerHTML = APP.operational.drafts.map(draft => `
+        <div class="operational-item">
+            <div><strong>${escHtml(draft.customer_name || 'Khách lẻ')}</strong><small>${draft.order_type === 'DINE_IN' ? `Tại bàn ${escHtml(draft.table_id)}` : 'Mang đi'} · ${draft.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)} món</small></div>
+            <button class="btn-primary" data-draft-action="restore" data-draft-id="${escHtml(draft.draft_id)}">Mở</button>
+        </div>`).join('');
+}
+
+async function restoreDraft(draftId) {
+    const draft = APP.operational.drafts.find(item => item.draft_id === draftId);
+    if (!draft) return;
+    APP.cartItems = draft.items.map(item => ({ id: item.id, name: item.name, price: Number(item.price), quantity: Number(item.quantity) }));
+    APP.activeDraftId = draft.draft_id;
+    APP.orderContext.orderType = draft.order_type;
+    APP.orderContext.tableId = draft.table_id;
+    APP.orderContext.customerName = draft.customer_name;
+    APP.orderContext.customerPhone = draft.customer_phone;
+    APP.orderContext.note = draft.note;
+    document.getElementById('vatSelect').value = String(draft.vat_percent || 0);
+    renderOperationalControls();
+    renderCart();
+    updateCalc();
+    closeOperationalModal('draftModal');
+    showToast('Đã mở đơn tạm', 'success');
+}
+
+function closeOperationalModal(id) { document.getElementById(id)?.classList.remove('active'); }
+
+function openShiftModal() {
+    const current = APP.operational.currentShift;
+    document.getElementById('shiftStatus').textContent = current
+        ? `Đang mở ca: ${current.staff_name || 'Chưa ghi tên'} · từ ${new Date(current.opened_at).toLocaleTimeString('vi-VN')}`
+        : 'Chưa mở ca bán hàng.';
+    document.getElementById('shiftCashLabel').textContent = current ? 'Tiền kiểm ca' : 'Tiền đầu ca';
+    document.getElementById('shiftActionBtn').textContent = current ? 'Chốt ca' : 'Mở ca';
+    document.getElementById('shiftStaffName').value = current?.staff_name || APP.orderContext.staffName || '';
+    document.getElementById('shiftCash').value = '';
+    document.getElementById('shiftModal').classList.add('active');
+}
+
+async function submitShiftAction() {
+    const cash = Number(document.getElementById('shiftCash').value || 0);
+    const staffName = document.getElementById('shiftStaffName').value.trim();
+    try {
+        if (APP.operational.currentShift) {
+            if (!APP.demoMode) {
+                const result = await gsFetch('closeShift', { shift: { closing_cash: cash } });
+                await verifyWriteAccepted(result.operationId);
+            }
+            APP.operational.currentShift = null;
+            showToast('Đã chốt ca', 'success');
+        } else {
+            if (!APP.demoMode) {
+                const result = await gsFetch('openShift', { shift: { opening_cash: cash, staff_name: staffName } });
+                await verifyWriteAccepted(result.operationId);
+            }
+            APP.operational.currentShift = { opened_at: new Date().toISOString(), opening_cash: cash, staff_name: staffName };
+            APP.orderContext.staffName = staffName;
+            showToast('Đã mở ca', 'success');
+        }
+        if (!APP.demoMode) await loadOperationalData();
+        closeOperationalModal('shiftModal');
+    } catch (error) {
+        showToast(`Không thể cập nhật ca: ${friendlyErrorMessage(error)}`, 'error', 6000);
+    }
+}
+
 // ============================================================
 // 4. GOOGLE SHEETS API (via Apps Script Web App)
 // ============================================================
@@ -217,7 +485,7 @@ function setStatusBadge(type, text) {
 async function gsFetch(action, payload = {}) {
     if (APP.demoMode) return { success: true };
     try {
-        if (action === 'getMenu' || action === 'getHistory' || action === 'getOrder' || action === 'getOperationStatus') {
+        if (['getMenu', 'getHistory', 'getOrder', 'getOperationStatus', 'getOperations'].includes(action)) {
             // GET request: Apps Script trả về JSON qua doGet, không bị CORS
             const url = new URL(APP.scriptUrl);
             url.searchParams.set('action', action);
@@ -372,6 +640,7 @@ async function loadMenuFromSheets(forceRefresh = false) {
         if (cached && cachedUrl === APP.scriptUrl && (Date.now() - ts) < CACHE_TTL) {
             try {
                 APP.menuItems = JSON.parse(cached);
+                renderCategoryFilters();
                 renderMenuGrid(APP.menuItems);
                 renderMenuTable();
                 showToast(`Thực đơn sẵn sàng (${APP.menuItems.length} món) ⚡`, 'success');
@@ -390,6 +659,7 @@ async function loadMenuFromSheets(forceRefresh = false) {
             // Save to cache
             saveMenuCache();
         }
+        renderCategoryFilters();
         renderMenuGrid(APP.menuItems);
         renderMenuTable();
         showToast(`Đã tải ${APP.menuItems.length} món ✓`, 'success');
@@ -415,11 +685,36 @@ function normalizeSearchText(value) {
         .replace(/[\u0300-\u036f]/g, '');
 }
 
+function getMenuCategory(name) {
+    const n = normalizeSearchText(name);
+    if (n.includes('ca phe') || n.includes('coffee') || n.includes('matcha')) return 'Cà phê';
+    if (n.includes('tra') || n.includes('tea')) return 'Trà';
+    if (n.includes('sinh to') || n.includes('nuoc ep') || n.includes('juice')) return 'Nước ép';
+    return 'Khác';
+}
+
+function renderCategoryFilters() {
+    const el = document.getElementById('categoryFilters');
+    if (!el) return;
+    const categories = ['all', ...new Set(APP.menuItems.filter(i => i.status === 'Active').map(i => getMenuCategory(i.name)))];
+    el.innerHTML = categories.map(category => {
+        const label = category === 'all' ? 'Tất cả món' : category;
+        return `<button class="category-chip ${APP.menuCategory === category ? 'active' : ''}" data-category="${escHtml(category)}">${escHtml(label)}</button>`;
+    }).join('');
+}
+
+function setMenuCategory(category) {
+    APP.menuCategory = category || 'all';
+    renderCategoryFilters();
+    filterMenu(document.getElementById('searchMenu')?.value || '');
+}
+
 function renderMenuGrid(items, filterText = '') {
     const grid = document.getElementById('menuGrid');
     const normalizedFilter = normalizeSearchText(filterText);
     const active = items.filter(i =>
         i.status === 'Active' &&
+        (APP.menuCategory === 'all' || getMenuCategory(i.name) === APP.menuCategory) &&
         (!normalizedFilter || normalizeSearchText(i.name).includes(normalizedFilter))
     );
 
@@ -605,6 +900,7 @@ function updateCalc() {
     document.getElementById('subtotalDisplay').textContent = formatCurrency(subtotal);
     document.getElementById('taxDisplay').textContent = formatCurrency(tax);
     document.getElementById('grandTotalDisplay').textContent = formatCurrency(grand);
+    updateCashChange();
 }
 
 // ============================================================
@@ -666,7 +962,11 @@ async function checkout(orderData = null) {
 
             const writeResult = await gsFetch('checkoutOrder', {
                 orderRow: orderRow,
-                itemRows: itemRows
+                itemRows: itemRows,
+                orderMeta: {
+                    ...(data.context || APP.orderContext),
+                    shiftId: APP.operational.currentShift?.shift_id || ''
+                }
             });
             await verifyWriteAccepted(writeResult.operationId);
 
@@ -917,6 +1217,18 @@ function showToast(msg, type = 'info', duration = 2800) {
 }
 
 function handleDynamicClick(e) {
+    const draftButton = e.target.closest('[data-draft-action]');
+    if (draftButton?.dataset.draftAction === 'restore') {
+        restoreDraft(draftButton.dataset.draftId);
+        return;
+    }
+
+    const categoryButton = e.target.closest('[data-category]');
+    if (categoryButton) {
+        setMenuCategory(categoryButton.dataset.category);
+        return;
+    }
+
     const addButton = e.target.closest('[data-add-to-cart]');
     if (addButton) {
         e.stopPropagation();
@@ -1069,6 +1381,11 @@ function closeReceipt() {
     if (APP.resetCartOnReceiptClose) {
         APP.cartItems = [];
         document.getElementById('vatSelect').value = '0';
+        APP.orderContext = { orderType: 'TAKEAWAY', tableId: '', customerName: 'Khách lẻ', customerPhone: '', note: '', paymentMethod: 'CASH', cashReceived: 0, staffName: APP.orderContext.staffName || '' };
+        APP.activeDraftId = '';
+        const cashInput = document.getElementById('cashReceived');
+        if (cashInput) cashInput.value = '';
+        renderOperationalControls();
         renderCart();
         updateCalc();
         showToast('Đã đóng hóa đơn & sẵn sàng đơn mới', 'info');
@@ -1094,6 +1411,22 @@ function changeHistoryFilter(days) {
     document.getElementById(`btnFilter${days}`).classList.add('active');
 
     loadHistoryFromSheets();
+}
+
+function exportHistoryCsv() {
+    const rows = [['Mã đơn', 'Thời gian', 'Tạm tính', 'VAT', 'Thuế', 'Tổng cộng', 'Trạng thái']];
+    APP.history.orders.forEach(order => rows.push([
+        order.order_id, order.timestamp, order.sub_total, order.tax_percent,
+        order.tax_amount, order.grand_total, order.status
+    ]));
+    if (rows.length === 1) return showToast('Chưa có lịch sử để xuất', 'info');
+    const csv = '\uFEFF' + rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cafe-pos-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
 }
 
 async function loadHistoryFromSheets() {
@@ -1166,6 +1499,7 @@ function renderHistoryTable() {
     document.getElementById('historyTotalOrders').textContent = totalOrdersCount;
     const cancelledEl = document.getElementById('historyCancelledOrders');
     if (cancelledEl) cancelledEl.textContent = cancelledCount;
+    renderHistoryInsights(filteredOrders);
 
     if (filteredOrders.length === 0) {
         tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
@@ -1199,6 +1533,27 @@ function renderHistoryTable() {
             </tr>
         `;
     }).join('');
+}
+
+function renderHistoryInsights(orders) {
+    const container = document.getElementById('historyInsights');
+    if (!container) return;
+    const activeIds = new Set(orders.filter(order => order.status !== 'CANCELLED').map(order => order.order_id));
+    const itemTotals = new Map();
+    APP.history.items.filter(item => activeIds.has(item.order_id)).forEach(item => {
+        itemTotals.set(item.item_name, (itemTotals.get(item.item_name) || 0) + item.quantity);
+    });
+    const topItems = [...itemTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+    const maxQuantity = topItems[0]?.[1] || 1;
+    const daily = new Map();
+    orders.filter(order => order.status !== 'CANCELLED').forEach(order => {
+        const key = new Date(order.timestamp).toLocaleDateString('vi-VN');
+        daily.set(key, (daily.get(key) || 0) + order.grand_total);
+    });
+    const latestDay = [...daily.entries()].slice(-1)[0];
+    container.innerHTML = `
+        <section class="insight-panel"><h3>Món bán chạy</h3>${topItems.length ? topItems.map(([name, quantity]) => `<div class="insight-row"><span>${escHtml(name)} · ${quantity}</span><span class="insight-bar"><i style="width:${Math.max(8, quantity / maxQuantity * 100)}%"></i></span></div>`).join('') : '<span class="summary-label">Chưa có dữ liệu bán hàng</span>'}</section>
+        <section class="insight-panel"><h3>Doanh thu gần nhất</h3><div class="summary-value">${latestDay ? formatCurrency(latestDay[1]) : '0 ₫'}</div><div class="summary-label">${latestDay ? latestDay[0] : 'Chưa có hóa đơn hoàn tất'}</div></section>`;
 }
 
 async function cancelOrderUI(orderId) {
@@ -1251,16 +1606,28 @@ function reprintOrder(orderId) {
 }
 function previewCheckout() {
     if (!APP.cartItems.length) return showToast('Giỏ hàng đang trống', 'error');
+    updateOrderContext();
+    updatePaymentMethod();
+    if (APP.orderContext.orderType === 'DINE_IN' && !APP.orderContext.tableId) {
+        return showToast('Vui lòng chọn bàn cho đơn tại bàn', 'error');
+    }
     const vatPercent = Number(document.getElementById('vatSelect').value);
     const subtotal = calcSubtotal();
     const taxAmount = calcTax(subtotal, vatPercent);
+    const grandTotal = calcGrandTotal(subtotal, taxAmount);
+    const cashReceived = Number(document.getElementById('cashReceived')?.value || 0);
+    if (APP.orderContext.paymentMethod === 'CASH' && cashReceived > 0 && cashReceived < grandTotal) {
+        return showToast('Tiền khách đưa chưa đủ', 'error');
+    }
     APP.pendingCheckout = {
         orderId: generateOrderId(),
         timestamp: new Date().toISOString(),
         vatPercent: vatPercent,
         subtotal: subtotal,
         taxAmount: taxAmount,
-        grandTotal: calcGrandTotal(subtotal, taxAmount),
+        grandTotal,
+        context: { ...APP.orderContext, cashReceived, changeAmount: Math.max(0, cashReceived - grandTotal) },
+        activeDraftId: APP.activeDraftId || '',
         items: APP.cartItems.map(item => ({
             id: item.id,
             name: item.name,
@@ -1278,16 +1645,50 @@ function previewCheckout() {
 
 async function confirmCheckout() {
     if (!APP.pendingCheckout) return;
+    const completedCheckout = APP.pendingCheckout;
     const btn = document.getElementById('btnConfirmCheckout');
     btn.disabled = true;
     btn.textContent = 'Đang lưu...';
     await checkout(APP.pendingCheckout);
     if (APP.resetCartOnReceiptClose) {
+        await persistCheckoutCustomer(completedCheckout.context);
+        await completeDraftAfterCheckout(completedCheckout.activeDraftId);
         btn.hidden = true;
         document.getElementById('btnPrintReceipt').hidden = false;
     } else {
         btn.disabled = false;
         btn.textContent = '✔️ Xác nhận thanh toán';
         showToast('Lưu đơn thất bại', 'error');
+    }
+}
+
+async function persistCheckoutCustomer(context) {
+    if (!context?.customerPhone || !context.customerName || context.customerName === 'Khách lẻ') return;
+    try {
+        if (APP.demoMode) {
+            const exists = APP.operational.customers.some(customer => customer.phone === context.customerPhone);
+            if (!exists) APP.operational.customers.push({ customer_id: `CUS-${Date.now()}`, name: context.customerName, phone: context.customerPhone });
+        } else {
+            const result = await gsFetch('saveCustomer', { customer: { name: context.customerName, phone: context.customerPhone } });
+            await verifyWriteAccepted(result.operationId);
+        }
+    } catch (error) {
+        console.warn('Could not save customer', error);
+    }
+}
+
+async function completeDraftAfterCheckout(draftId) {
+    if (!draftId) return;
+    try {
+        if (APP.demoMode) {
+            APP.operational.drafts = APP.operational.drafts.filter(draft => draft.draft_id !== draftId);
+        } else {
+            const result = await gsFetch('deleteDraft', { draft_id: draftId });
+            await verifyWriteAccepted(result.operationId);
+            await loadOperationalData();
+        }
+        APP.activeDraftId = '';
+    } catch (error) {
+        console.warn('Could not close completed draft', error);
     }
 }

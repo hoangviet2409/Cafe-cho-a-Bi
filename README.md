@@ -11,6 +11,9 @@
 - 💾 Dữ liệu đồng bộ lên Google Sheets qua Apps Script
 - ✅ Xác minh lại dữ liệu sau khi ghi để tránh báo thành công giả
 - 📱 Hỗ trợ PWA (cài như App trên điện thoại/tablet)
+- 🪑 Đơn mang đi/tại bàn, ghi chú, khách hàng và tiền thối
+- ⏸️ Giữ đơn tạm, mở/chốt ca, báo cáo món bán chạy và doanh thu
+- 📦 Trang vận hành theo dõi bàn, tồn kho, khách hàng và nhân viên
 
 ## Cách dùng
 1. Mở trang web
