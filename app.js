@@ -363,7 +363,7 @@ function updateCashChange() {
 function currentDraftPayload() {
     updateOrderContext();
     return {
-        draft_id: APP.activeDraftId || '',
+        draft_id: APP.activeDraftId,
         order_type: APP.orderContext.orderType,
         table_id: APP.orderContext.tableId,
         customer_name: APP.orderContext.customerName,
@@ -374,12 +374,16 @@ function currentDraftPayload() {
     };
 }
 
+function generateDraftId() {
+    return `DRF-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+}
+
 async function saveCurrentDraft() {
     if (!APP.cartItems.length) return showToast('Chưa có món để giữ đơn', 'error');
+    if (!APP.activeDraftId) APP.activeDraftId = generateDraftId();
     const draft = currentDraftPayload();
     try {
         if (APP.demoMode) {
-            draft.draft_id = draft.draft_id || `DRF-${Date.now()}`;
             const existing = APP.operational.drafts.findIndex(item => item.draft_id === draft.draft_id);
             if (existing >= 0) APP.operational.drafts[existing] = draft;
             else APP.operational.drafts.unshift(draft);
@@ -388,7 +392,7 @@ async function saveCurrentDraft() {
             await verifyWriteAccepted(result.operationId);
             await loadOperationalData();
         }
-        APP.activeDraftId = draft.draft_id || APP.activeDraftId;
+        APP.activeDraftId = draft.draft_id;
         showToast('Đã giữ đơn tạm', 'success');
     } catch (error) {
         showToast(`Không thể giữ đơn: ${friendlyErrorMessage(error)}`, 'error', 6000);
@@ -410,7 +414,7 @@ function renderDraftList() {
     list.innerHTML = APP.operational.drafts.map(draft => `
         <div class="operational-item">
             <div><strong>${escHtml(draft.customer_name || 'Khách lẻ')}</strong><small>${draft.order_type === 'DINE_IN' ? `Tại bàn ${escHtml(draft.table_id)}` : 'Mang đi'} · ${draft.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)} món</small></div>
-            <button class="btn-primary" data-draft-action="restore" data-draft-id="${escHtml(draft.draft_id)}">Mở</button>
+            <div class="table-actions"><button class="btn-secondary btn-sm" data-draft-action="delete" data-draft-id="${escHtml(draft.draft_id)}">Xóa</button><button class="btn-primary" data-draft-action="restore" data-draft-id="${escHtml(draft.draft_id)}">Mở</button></div>
         </div>`).join('');
 }
 
@@ -430,6 +434,24 @@ async function restoreDraft(draftId) {
     updateCalc();
     closeOperationalModal('draftModal');
     showToast('Đã mở đơn tạm', 'success');
+}
+
+async function deleteDraftUI(draftId) {
+    if (!confirm('Xóa đơn tạm này?')) return;
+    try {
+        if (APP.demoMode) {
+            APP.operational.drafts = APP.operational.drafts.filter(draft => draft.draft_id !== draftId);
+        } else {
+            const result = await gsFetch('deleteDraft', { draft_id: draftId });
+            await verifyWriteAccepted(result.operationId);
+            await loadOperationalData();
+        }
+        if (APP.activeDraftId === draftId) APP.activeDraftId = '';
+        renderDraftList();
+        showToast('Đã xóa đơn tạm', 'success');
+    } catch (error) {
+        showToast(`Không thể xóa đơn tạm: ${friendlyErrorMessage(error)}`, 'error', 6000);
+    }
 }
 
 function closeOperationalModal(id) { document.getElementById(id)?.classList.remove('active'); }
@@ -1220,6 +1242,10 @@ function handleDynamicClick(e) {
     const draftButton = e.target.closest('[data-draft-action]');
     if (draftButton?.dataset.draftAction === 'restore') {
         restoreDraft(draftButton.dataset.draftId);
+        return;
+    }
+    if (draftButton?.dataset.draftAction === 'delete') {
+        deleteDraftUI(draftButton.dataset.draftId);
         return;
     }
 
