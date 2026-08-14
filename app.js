@@ -15,10 +15,15 @@ const APP = {
     cartItems: [],        // Array<{id, name, price, quantity}>
     history: {
         orders: [],
-        items: []
+        items: [],
+        meta: [],
+        cancellations: {}
     },
     historyFilterDays: 1, // Default: 1 (Hôm nay), 7 (7 ngày), 0 (Tất cả)
     historySearchQuery: '',
+    selectedHistoryOrderIds: new Set(),
+    historyDetailOrderId: '',
+    pendingCancellationOrderIds: [],
     menuCategory: 'all',
     adminFilterStatus: 'all',
     deleteTargetId: null,
@@ -473,12 +478,27 @@ async function submitShiftAction() {
     const staffName = document.getElementById('shiftStaffName').value.trim();
     try {
         if (APP.operational.currentShift) {
+            const closedShift = { ...APP.operational.currentShift };
             if (!APP.demoMode) {
                 const result = await gsFetch('closeShift', { shift: { closing_cash: cash } });
                 await verifyWriteAccepted(result.operationId);
             }
             APP.operational.currentShift = null;
-            showToast('Đã chốt ca', 'success');
+            if (APP.demoMode) {
+                openShiftReport({
+                    opening_cash: closedShift.opening_cash,
+                    cash_sales: 0,
+                    expected_cash: closedShift.opening_cash,
+                    closing_cash: cash,
+                    difference: cash - closedShift.opening_cash,
+                    order_count: 0
+                });
+            } else {
+                const report = await gsFetch('getShiftReport', { shift_id: closedShift.shift_id });
+                if (!report?.success) throw new Error(report?.error || 'Không thể tải đối soát ca');
+                openShiftReport(report);
+            }
+            showToast('Đã chốt ca và tạo đối soát', 'success');
         } else {
             if (!APP.demoMode) {
                 const result = await gsFetch('openShift', { shift: { opening_cash: cash, staff_name: staffName } });
@@ -495,6 +515,22 @@ async function submitShiftAction() {
     }
 }
 
+function openShiftReport(report = {}) {
+    const body = document.getElementById('shiftReportBody');
+    if (!body) return;
+    const rows = [
+        ['Tiền đầu ca', formatCurrency(Number(report.opening_cash || 0))],
+        ['Doanh thu tiền mặt', formatCurrency(Number(report.cash_sales || 0))],
+        ['Tiền dự kiến', formatCurrency(Number(report.expected_cash || 0))],
+        ['Tiền kiểm thực tế', formatCurrency(Number(report.closing_cash || 0))],
+        ['Chênh lệch', formatCurrency(Math.abs(Number(report.difference || 0)))]
+    ];
+    const difference = Number(report.difference || 0);
+    body.innerHTML = `<div class="shift-report-summary ${difference === 0 ? 'balanced' : 'unbalanced'}"><strong>${difference === 0 ? 'Khớp tiền mặt' : difference > 0 ? 'Dư tiền mặt' : 'Thiếu tiền mặt'}</strong><span>${Number(report.order_count || 0)} đơn tiền mặt trong ca</span></div>`
+        + rows.map(([label, value]) => `<div class="shift-report-row"><span>${label}</span><strong>${value}</strong></div>`).join('');
+    document.getElementById('shiftReportModal').classList.add('active');
+}
+
 // ============================================================
 // 4. GOOGLE SHEETS API (via Apps Script Web App)
 // ============================================================
@@ -507,7 +543,7 @@ async function submitShiftAction() {
 async function gsFetch(action, payload = {}) {
     if (APP.demoMode) return { success: true };
     try {
-        if (['getMenu', 'getHistory', 'getOrder', 'getOperationStatus', 'getOperations'].includes(action)) {
+        if (['getMenu', 'getHistory', 'getOrder', 'getOperationStatus', 'getOperations', 'getShiftReport'].includes(action)) {
             // GET request: Apps Script trả về JSON qua doGet, không bị CORS
             const url = new URL(APP.scriptUrl);
             url.searchParams.set('action', action);
@@ -522,6 +558,9 @@ async function gsFetch(action, payload = {}) {
             if (action === 'getOperationStatus' && payload.operation_id) {
                 url.searchParams.set('operation_id', payload.operation_id);
             }
+            if (action === 'getShiftReport' && payload.shift_id) {
+                url.searchParams.set('shift_id', payload.shift_id);
+            }
             const res = await fetch(url.toString(), { method: 'GET' });
             const data = await res.json();
             if (data && data.success === false) {
@@ -533,7 +572,7 @@ async function gsFetch(action, payload = {}) {
             const body = APP.apiKey
                 ? { action, key: APP.apiKey, ...payload, operation_id: operationId }
                 : { action, ...payload, operation_id: operationId };
-            if (['appendMenuItem', 'updateMenuItem', 'deleteMenuItem', 'cancelOrder'].includes(action)) body.admin_pin = APP.adminPin;
+            if (['appendMenuItem', 'updateMenuItem', 'deleteMenuItem', 'cancelOrder', 'cancelOrders'].includes(action)) body.admin_pin = APP.adminPin;
 
             // POST no-cors: Apps Script nhận dữ liệu, sau đó app xác minh bằng GET.
             await fetch(APP.scriptUrl, {
@@ -633,7 +672,7 @@ async function verifyMenuMutation(predicate, errorMessage) {
 async function verifyOrderWritten(orderId, expectedItems) {
     for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt++) {
         const data = await gsFetch('getOrder', { order_id: orderId });
-        if (data && data.order && String(data.order[6]) === 'ACTIVE'
+        if (data && data.order && ['ACTIVE', 'PAID'].includes(String(data.order[6]))
             && Array.isArray(data.items) && data.items.length === expectedItems.length
             && data.items.every((item, index) => Number(item[2]) === expectedItems[index].quantity
                 && String(item[5]) === 'ACTIVE')) return data;
@@ -1239,6 +1278,12 @@ function showToast(msg, type = 'info', duration = 2800) {
 }
 
 function handleDynamicClick(e) {
+    const historySelection = e.target.closest('[data-history-select]');
+    if (historySelection) {
+        toggleHistoryOrder(historySelection.dataset.historySelect, historySelection.checked);
+        return;
+    }
+
     const draftButton = e.target.closest('[data-draft-action]');
     if (draftButton?.dataset.draftAction === 'restore') {
         restoreDraft(draftButton.dataset.draftId);
@@ -1290,6 +1335,7 @@ function handleDynamicClick(e) {
         const orderId = historyButton.dataset.orderId;
         if (historyButton.dataset.historyAction === 'reprint') reprintOrder(orderId);
         if (historyButton.dataset.historyAction === 'cancel') cancelOrderUI(orderId);
+        if (historyButton.dataset.historyAction === 'detail') openHistoryDetail(orderId);
     }
 }
 
@@ -1331,6 +1377,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Escape') {
             document.getElementById('itemModal').classList.remove('active');
             document.getElementById('deleteModal').classList.remove('active');
+            closeHistoryDetail();
+            closeCancellationModal();
+            closeOperationalModal('shiftReportModal');
         }
     });
     document.addEventListener('click', handleDynamicClick);
@@ -1481,6 +1530,17 @@ async function loadHistoryFromSheets() {
                 order_id: String(i[0]), item_name: String(i[1]), quantity: Number(i[2]),
                 unit_price: Number(i[3]), line_total: Number(i[4])
             }));
+            APP.history.meta = (data.meta || []).map(row => ({
+                order_id: String(row[0]), order_type: String(row[1] || 'TAKEAWAY'), table_id: String(row[2] || ''),
+                customer_name: String(row[3] || 'Khách lẻ'), customer_phone: String(row[4] || ''), note: String(row[5] || ''),
+                payment_method: String(row[6] || 'CASH'), cash_received: Number(row[7] || 0), change_amount: Number(row[8] || 0),
+                staff_name: String(row[9] || ''), shift_id: String(row[10] || '')
+            }));
+            APP.history.cancellations = (data.cancellations || []).reduce((records, row) => {
+                records[String(row[0])] = { cancelled_at: String(row[1] || ''), reason: String(row[2] || ''), note: String(row[3] || '') };
+                return records;
+            }, {});
+            APP.selectedHistoryOrderIds.clear();
             showToast('Đã tải lịch sử ✓', 'success');
         }
 
@@ -1495,30 +1555,23 @@ async function loadHistoryFromSheets() {
     }
 }
 
+function getFilteredHistoryOrders() {
+    const query = APP.historySearchQuery || '';
+    return APP.history.orders
+        .slice()
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .filter(order => !query || String(order.order_id).toLowerCase().includes(query));
+}
+
 function renderHistoryTable() {
     const tbody = document.getElementById('historyTableBody');
-    const orders = APP.history.orders;
-
-    // Sort by timestamp descending
-    orders.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-    // Summary follows the selected history range and excludes cancelled orders.
+    const filteredOrders = getFilteredHistoryOrders();
     let totalRevenue = 0;
     let totalOrdersCount = 0;
     let cancelledCount = 0;
-    const query = APP.historySearchQuery || '';
-    const filteredOrders = orders.filter(order => {
-        if (!query) return true;
-        return String(order.order_id).toLowerCase().includes(query);
-    });
-
-    filteredOrders.forEach(o => {
-        if (o.status === 'CANCELLED') {
-            cancelledCount++;
-        } else {
-            totalRevenue += o.grand_total;
-            totalOrdersCount++;
-        }
+    filteredOrders.forEach(order => {
+        if (order.status === 'CANCELLED') cancelledCount++;
+        else { totalRevenue += order.grand_total; totalOrdersCount++; }
     });
 
     document.getElementById('historyTotalRevenue').textContent = formatCurrency(totalRevenue);
@@ -1526,39 +1579,64 @@ function renderHistoryTable() {
     const cancelledEl = document.getElementById('historyCancelledOrders');
     if (cancelledEl) cancelledEl.textContent = cancelledCount;
     renderHistoryInsights(filteredOrders);
+    renderHistoryBulkBar(filteredOrders);
 
-    if (filteredOrders.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
-            Chưa có hóa đơn nào được lưu.
-        </td></tr>`;
+    if (!filteredOrders.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:32px">Chưa có hóa đơn nào được lưu.</td></tr>`;
         return;
     }
 
-    tbody.innerHTML = filteredOrders.map(o => {
-        const d = new Date(o.timestamp);
-        const dateStr = d.toLocaleDateString('vi-VN') + ' ' + d.toLocaleTimeString('vi-VN');
-        const isCancelled = o.status === 'CANCELLED';
-        const rowStyle = isCancelled ? 'opacity:0.5;' : '';
-        const priceStyle = isCancelled
-            ? 'text-decoration:line-through;color:var(--red);'
-            : 'color:var(--accent);font-weight:700;';
-        const statusLabel = isCancelled
-            ? '<span class="badge badge-inactive">Đã hủy</span>'
-            : '<span class="badge badge-active">Hoạt động</span>';
-        const actionBtns = isCancelled
-            ? `<button class="action-btn" data-history-action="reprint" data-order-id="${escHtml(o.order_id)}">🖨️ In lại</button>`
-            : `<button class="action-btn" data-history-action="reprint" data-order-id="${escHtml(o.order_id)}">🖨️ In lại</button>
-               <button class="action-btn" style="margin-left:6px;color:var(--red);border-color:rgba(239,68,68,0.4);" data-history-action="cancel" data-order-id="${escHtml(o.order_id)}">✕ Hủy</button>`;
-        return `
-            <tr style="${rowStyle}">
-              <td style="color:var(--text-muted);font-size:0.78rem;font-family:monospace;font-weight:bold">${escHtml(o.order_id)}</td>
-              <td style="font-size:0.85rem">${dateStr}</td>
-              <td style="${priceStyle}">${formatCurrency(o.grand_total)}</td>
-              <td>${statusLabel}</td>
-              <td>${actionBtns}</td>
-            </tr>
-        `;
+    tbody.innerHTML = filteredOrders.map(order => {
+        const date = new Date(order.timestamp);
+        const isCancelled = order.status === 'CANCELLED';
+        const checked = APP.selectedHistoryOrderIds.has(order.order_id) ? 'checked' : '';
+        const cancellation = APP.history.cancellations[order.order_id];
+        return `<tr class="history-row ${isCancelled ? 'is-cancelled' : ''}">
+            <td class="history-select-col"><input type="checkbox" data-history-select="${escHtml(order.order_id)}" ${checked} ${isCancelled ? 'disabled' : ''} aria-label="Chọn đơn ${escHtml(order.order_id)}" /></td>
+            <td class="history-order-id">${escHtml(order.order_id)}</td>
+            <td class="history-time">${date.toLocaleDateString('vi-VN')}<small>${date.toLocaleTimeString('vi-VN')}</small></td>
+            <td class="history-total">${formatCurrency(order.grand_total)}</td>
+            <td>${isCancelled
+                ? `<span class="badge badge-inactive">Đã hủy</span>${cancellation?.reason ? `<small class="cancellation-reason">${escHtml(cancellation.reason)}</small>` : ''}`
+                : '<span class="badge badge-active">Đã thanh toán</span>'}</td>
+            <td><button class="action-btn" data-history-action="detail" data-order-id="${escHtml(order.order_id)}">Chi tiết</button></td>
+        </tr>`;
     }).join('');
+}
+
+function renderHistoryBulkBar(visibleOrders = getFilteredHistoryOrders()) {
+    const activeIds = new Set(APP.history.orders.filter(order => order.status !== 'CANCELLED').map(order => order.order_id));
+    [...APP.selectedHistoryOrderIds].forEach(id => { if (!activeIds.has(id)) APP.selectedHistoryOrderIds.delete(id); });
+    const count = APP.selectedHistoryOrderIds.size;
+    const bar = document.getElementById('historyBulkBar');
+    const countEl = document.getElementById('historySelectionCount');
+    const selectAll = document.getElementById('historySelectAll');
+    if (bar) bar.hidden = count === 0;
+    if (countEl) countEl.textContent = count;
+    const selectableVisible = visibleOrders.filter(order => order.status !== 'CANCELLED');
+    if (selectAll) {
+        selectAll.checked = selectableVisible.length > 0 && selectableVisible.every(order => APP.selectedHistoryOrderIds.has(order.order_id));
+        selectAll.indeterminate = !selectAll.checked && selectableVisible.some(order => APP.selectedHistoryOrderIds.has(order.order_id));
+    }
+}
+
+function toggleHistoryOrder(orderId, checked) {
+    if (checked) APP.selectedHistoryOrderIds.add(orderId);
+    else APP.selectedHistoryOrderIds.delete(orderId);
+    renderHistoryTable();
+}
+
+function toggleAllHistoryOrders(checked) {
+    getFilteredHistoryOrders().filter(order => order.status !== 'CANCELLED').forEach(order => {
+        if (checked) APP.selectedHistoryOrderIds.add(order.order_id);
+        else APP.selectedHistoryOrderIds.delete(order.order_id);
+    });
+    renderHistoryTable();
+}
+
+function clearHistorySelection() {
+    APP.selectedHistoryOrderIds.clear();
+    renderHistoryTable();
 }
 
 function renderHistoryInsights(orders) {
@@ -1577,40 +1655,109 @@ function renderHistoryInsights(orders) {
         daily.set(key, (daily.get(key) || 0) + order.grand_total);
     });
     const latestDay = [...daily.entries()].slice(-1)[0];
+    const reasons = new Map();
+    orders.filter(order => order.status === 'CANCELLED').forEach(order => {
+        const reason = APP.history.cancellations[order.order_id]?.reason || 'Chưa ghi lý do';
+        reasons.set(reason, (reasons.get(reason) || 0) + 1);
+    });
+    const cancellationSummary = [...reasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
     container.innerHTML = `
         <section class="insight-panel"><h3>Món bán chạy</h3>${topItems.length ? topItems.map(([name, quantity]) => `<div class="insight-row"><span>${escHtml(name)} · ${quantity}</span><span class="insight-bar"><i style="width:${Math.max(8, quantity / maxQuantity * 100)}%"></i></span></div>`).join('') : '<span class="summary-label">Chưa có dữ liệu bán hàng</span>'}</section>
-        <section class="insight-panel"><h3>Doanh thu gần nhất</h3><div class="summary-value">${latestDay ? formatCurrency(latestDay[1]) : '0 ₫'}</div><div class="summary-label">${latestDay ? latestDay[0] : 'Chưa có hóa đơn hoàn tất'}</div></section>`;
+        <section class="insight-panel"><h3>Doanh thu gần nhất</h3><div class="summary-value">${latestDay ? formatCurrency(latestDay[1]) : '0 ₫'}</div><div class="summary-label">${latestDay ? latestDay[0] : 'Chưa có hóa đơn hoàn tất'}</div></section>
+        <section class="insight-panel"><h3>Phân tích hủy đơn</h3>${cancellationSummary.length ? cancellationSummary.map(([reason, count]) => `<div class="insight-row"><span>${escHtml(reason)}</span><strong>${count} đơn</strong></div>`).join('') : '<span class="summary-label">Chưa có đơn hủy trong phạm vi này</span>'}</section>`;
 }
 
-async function cancelOrderUI(orderId) {
-    // Trước đây nút này gửi thẳng admin_pin rỗng lên server nếu bạn chưa từng
-    // vào trang Admin nhập PIN trong phiên làm việc — server từ chối âm thầm,
-    // và người dùng chỉ thấy lỗi "Không thể xác minh..." sau ~4 giây chờ, không
-    // rõ lý do thật là do chưa nhập PIN. Giờ bắt nhập PIN ngay tại đây trước.
-    if (!APP.demoMode && !isAuthenticatedAdmin) {
-        APP.pendingCancelOrderId = orderId;
-        openPinModal();
-        return;
-    }
-    await performCancelOrder(orderId);
+function openHistoryDetail(orderId) {
+    const order = APP.history.orders.find(item => item.order_id === orderId);
+    if (!order) return showToast('Không tìm thấy hóa đơn', 'error');
+    APP.historyDetailOrderId = orderId;
+    const items = APP.history.items.filter(item => item.order_id === orderId);
+    const meta = APP.history.meta.find(item => item.order_id === orderId);
+    const cancellation = APP.history.cancellations[orderId];
+    const isCancelled = order.status === 'CANCELLED';
+    document.getElementById('historyDetailTitle').textContent = orderId;
+    document.getElementById('historyDetailBody').innerHTML = `
+        <div class="history-detail-meta">
+            <div><span>Thời gian</span><strong>${new Date(order.timestamp).toLocaleString('vi-VN')}</strong></div>
+            <div><span>Trạng thái</span><strong class="${isCancelled ? 'text-danger' : 'text-success'}">${isCancelled ? 'Đã hủy' : 'Đã thanh toán'}</strong></div>
+            <div><span>Thanh toán</span><strong>${escHtml(meta?.payment_method || 'Tiền mặt')}</strong></div>
+            <div><span>Khách hàng</span><strong>${escHtml(meta?.customer_name || 'Khách lẻ')}</strong></div>
+        </div>
+        <div class="history-detail-items">${items.map(item => `<div><span>${escHtml(item.item_name)} <small>× ${item.quantity}</small></span><strong>${formatCurrency(item.line_total)}</strong></div>`).join('') || '<span class="summary-label">Không có chi tiết món</span>'}</div>
+        <div class="history-detail-total"><span>Tổng cộng</span><strong>${formatCurrency(order.grand_total)}</strong></div>
+        ${cancellation ? `<div class="cancellation-record"><strong>Nhật ký hủy</strong><span>${escHtml(cancellation.reason || 'Chưa ghi lý do')}</span>${cancellation.note ? `<small>${escHtml(cancellation.note)}</small>` : ''}<small>${new Date(cancellation.cancelled_at).toLocaleString('vi-VN')}</small></div>` : ''}`;
+    document.getElementById('historyDetailCancel').hidden = isCancelled;
+    document.getElementById('historyDetailModal').classList.add('active');
 }
 
-async function performCancelOrder(orderId) {
-    if (!confirm(`Bạn có chắc muốn HỦY đơn ${orderId}?\nĐơn hàng sẽ bị ghi chú là CANCELLED trong Google Sheets và không tính vào doanh thu.`)) return;
+function closeHistoryDetail() { document.getElementById('historyDetailModal').classList.remove('active'); }
+function reprintCurrentHistoryOrder() { if (APP.historyDetailOrderId) reprintOrder(APP.historyDetailOrderId); }
+function requestCurrentHistoryCancellation() { if (APP.historyDetailOrderId) openCancellationModal([APP.historyDetailOrderId]); }
+function requestSelectedCancellation() { openCancellationModal([...APP.selectedHistoryOrderIds]); }
+function cancelOrderUI(orderId) { openCancellationModal([orderId]); }
 
+function openCancellationModal(orderIds) {
+    const ids = [...new Set(orderIds)].filter(id => APP.history.orders.some(order => order.order_id === id && order.status !== 'CANCELLED'));
+    if (!ids.length) return showToast('Chỉ có thể hủy đơn đã thanh toán', 'info');
+    APP.pendingCancellationOrderIds = ids;
+    document.getElementById('cancellationOrderList').innerHTML = ids.map(id => {
+        const order = APP.history.orders.find(item => item.order_id === id);
+        return `<div><span>${escHtml(id)}</span><strong>${formatCurrency(order?.grand_total || 0)}</strong></div>`;
+    }).join('');
+    document.getElementById('cancellationReason').value = '';
+    document.getElementById('cancellationNote').value = '';
+    document.getElementById('cancellationPin').value = '';
+    toggleCancellationNote();
+    document.getElementById('cancellationModal').classList.add('active');
+    setTimeout(() => document.getElementById('cancellationReason').focus(), 100);
+}
+
+function closeCancellationModal() {
+    APP.pendingCancellationOrderIds = [];
+    document.getElementById('cancellationModal').classList.remove('active');
+}
+
+function toggleCancellationNote() {
+    const isOther = document.getElementById('cancellationReason')?.value === 'Khác';
+    document.getElementById('cancellationNoteRequired').hidden = !isOther;
+}
+
+async function submitCancellation() {
+    const ids = APP.pendingCancellationOrderIds;
+    const reason = document.getElementById('cancellationReason').value;
+    const note = document.getElementById('cancellationNote').value.trim();
+    const pin = document.getElementById('cancellationPin').value.trim();
+    if (!ids.length || !reason) return showToast('Vui lòng chọn lý do hủy', 'error');
+    if (reason === 'Khác' && !note) return showToast('Vui lòng nhập ghi chú cho lý do khác', 'error');
+    if (!APP.demoMode && pin.length < 4) return showToast('Vui lòng nhập PIN quản lý hợp lệ', 'error');
+    const button = document.getElementById('confirmCancellationBtn');
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = 'Đang hủy...';
     try {
+        APP.adminPin = pin;
+        isAuthenticatedAdmin = true;
         if (!APP.demoMode) {
-            const writeResult = await gsFetch('cancelOrder', { order_id: orderId });
-            await verifyWriteAccepted(writeResult.operationId);
-            await verifyOrderCancelled(orderId);
+            const result = await gsFetch('cancelOrders', { order_ids: ids, cancellation: { reason, note } });
+            await verifyWriteAccepted(result.operationId);
+            await Promise.all(ids.map(verifyOrderCancelled));
         }
-        // Update local state
-        const order = APP.history.orders.find(o => o.order_id === orderId);
-        if (order) order.status = 'CANCELLED';
+        const cancelledAt = new Date().toISOString();
+        ids.forEach(id => {
+            const order = APP.history.orders.find(item => item.order_id === id);
+            if (order) order.status = 'CANCELLED';
+            APP.history.cancellations[id] = { cancelled_at: cancelledAt, reason, note };
+            APP.selectedHistoryOrderIds.delete(id);
+        });
+        closeCancellationModal();
+        closeHistoryDetail();
         renderHistoryTable();
-        showToast(`Đã hủy đơn ${orderId}`, 'info');
-    } catch (e) {
-        showToast(`Không thể hủy đơn: ${friendlyErrorMessage(e)}`, 'error', 6000);
+        showToast(`Đã hủy ${ids.length} đơn và lưu nhật ký`, 'success');
+    } catch (error) {
+        showToast(`Không thể hủy đơn: ${friendlyErrorMessage(error)}`, 'error', 6000);
+    } finally {
+        button.disabled = false;
+        button.textContent = oldText;
     }
 }
 

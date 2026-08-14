@@ -7,12 +7,12 @@
 - 📋 Quản lý Menu (thêm/sửa/xóa món, bảo vệ bằng PIN)
 - 🧾 Xuất và In hóa đơn (hỗ trợ máy in nhiệt 80mm)
 - 📊 Lịch sử bán hàng & doanh thu hàng ngày
-- ❌ Hủy đơn hàng
+- ❌ Hủy một hoặc nhiều đơn bằng checkbox, bắt buộc lý do và PIN; lưu nhật ký hủy
 - 💾 Dữ liệu đồng bộ lên Google Sheets qua Apps Script
 - ✅ Xác minh lại dữ liệu sau khi ghi để tránh báo thành công giả
 - 📱 Hỗ trợ PWA (cài như App trên điện thoại/tablet)
 - 🪑 Đơn mang đi/tại bàn, ghi chú, khách hàng và tiền thối
-- ⏸️ Giữ đơn tạm, mở/chốt ca, báo cáo món bán chạy và doanh thu
+- ⏸️ Giữ đơn tạm, mở/chốt ca có đối soát tiền mặt, báo cáo món bán chạy/doanh thu/lý do hủy
 - 📦 Trang vận hành theo dõi bàn, tồn kho, khách hàng và nhân viên
 
 ## Cách dùng
@@ -23,7 +23,7 @@
 ## Bảo mật bắt buộc
 - Trước khi Deploy, thay `API_KEY` và `ADMIN_PIN` trong `apps-script.js` bằng hai giá trị riêng, khó đoán. Không dùng giá trị mẫu `REPLACE_...`.
 - Nhập đúng **API Key** khi kết nối app (khớp `API_KEY` trong `apps-script.js`). API Key là bắt buộc; ứng dụng chỉ ghi nhớ Script URL, không lưu API Key vào `localStorage`.
-- Khi vào trang Admin, app chỉ hỏi PIN như một lớp chặn nhẹ trên giao diện — PIN thật sự luôn được **Apps Script kiểm tra lại** mỗi khi bạn lưu/sửa/xóa món hoặc hủy đơn. Chỉ cần nhớ và nhập đúng `ADMIN_PIN` đã đặt trong `apps-script.js`; không còn bản sao PIN nào khác trong code cần sửa theo (bản trước có PIN hardcode `1234` trong `app.js`, dễ bị quên đồng bộ khi đổi PIN — bản này đã bỏ).
+- Khi vào trang Admin, app chỉ hỏi PIN như một lớp chặn nhẹ trên giao diện — PIN thật sự luôn được **Apps Script kiểm tra lại** mỗi khi bạn lưu/sửa/xóa món hoặc hủy đơn. Hủy đơn luôn yêu cầu nhập lại PIN và lý do; thông tin này được lưu vào tab `Order_Cancellations` tự tạo trong Google Sheet.
 - Không chia sẻ URL Web App, API key hoặc PIN ra ngoài gia đình. Sao lưu Google Sheet định kỳ trên Drive.
 - Món đã bán nên chuyển sang Inactive; không xóa để bảo toàn lịch sử.
 - Mỗi lần sửa `apps-script.js` phải **Deploy lại** (Manage deployments → Edit → New version) — Apps Script không tự cập nhật code cho Web App đang chạy.
@@ -35,6 +35,7 @@
    - Who has access: **Anyone**
 4. Copy URL và dán vào app
 5. Nếu đã từng deploy trước đó, chọn **Manage deployments → Edit → New version** sau khi cập nhật `apps-script.js`
+6. Sau khi cập nhật giao diện trên GitHub Pages, tải lại mạnh trang (`Ctrl + F5`) một lần để PWA nhận cache mới.
 
 ## Xử lý sự cố: Trang Thu ngân và Quản lý Menu không hiện món
 Cả hai trang đều đọc chung dữ liệu thực đơn, nên nếu cả hai cùng trống, hãy kiểm tra theo thứ tự:

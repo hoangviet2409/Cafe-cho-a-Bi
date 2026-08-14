@@ -344,6 +344,7 @@
                 <table class="menu-table">
                     <thead>
                         <tr>
+                            <th class="history-select-col"><input id="historySelectAll" type="checkbox" aria-label="Chọn tất cả đơn đang hiển thị" onchange="toggleAllHistoryOrders(this.checked)" /></th>
                             <th>Mã đơn (Order ID)</th>
                             <th>Thời gian</th>
                             <th>Thành tiền (Grand Total)</th>
@@ -354,6 +355,13 @@
                     <tbody id="historyTableBody">
                     </tbody>
                 </table>
+            </div>
+            <div id="historyBulkBar" class="history-bulk-bar" hidden>
+                <div><strong id="historySelectionCount">0</strong> đơn đã chọn <span>· Chỉ đơn đã thanh toán mới có thể hủy</span></div>
+                <div class="history-bulk-actions">
+                    <button class="btn-secondary" onclick="clearHistorySelection()">Bỏ chọn</button>
+                    <button class="btn-danger" onclick="requestSelectedCancellation()">Hủy các đơn đã chọn</button>
+                </div>
             </div>
         </div>
     </main>
@@ -430,6 +438,46 @@
             <div class="form-group"><label>Tên nhân viên</label><input id="shiftStaffName" placeholder="Ví dụ: Hoàng Việt" /></div>
             <div class="form-group"><label id="shiftCashLabel">Tiền đầu ca</label><input id="shiftCash" type="number" min="0" placeholder="0" /></div>
             <div class="modal-actions"><button id="shiftActionBtn" class="btn-primary" onclick="submitShiftAction()">Mở ca</button></div>
+        </div>
+    </div>
+
+    <!-- ============== HISTORY DETAIL / CANCELLATION ============== -->
+    <div id="historyDetailModal" class="modal-overlay">
+        <div class="modal-card history-detail-modal">
+            <div class="modal-heading"><div><span class="eyebrow">CHI TIẾT ĐƠN</span><h2 id="historyDetailTitle">—</h2></div><button class="icon-close" onclick="closeHistoryDetail()" aria-label="Đóng">×</button></div>
+            <div id="historyDetailBody" class="history-detail-body"></div>
+            <div class="modal-actions history-detail-actions">
+                <button class="btn-secondary" id="historyDetailReprint" onclick="reprintCurrentHistoryOrder()">🖨️ In lại</button>
+                <button class="btn-danger" id="historyDetailCancel" onclick="requestCurrentHistoryCancellation()">Hủy đơn</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="cancellationModal" class="modal-overlay">
+        <div class="modal-card cancellation-modal">
+            <div class="modal-heading"><div><span class="eyebrow">XÁC NHẬN THAO TÁC</span><h2>Hủy đơn hàng</h2></div><button class="icon-close" onclick="closeCancellationModal()" aria-label="Đóng">×</button></div>
+            <p class="modal-copy">Các đơn sau sẽ không còn được tính vào doanh thu. Thao tác được lưu nhật ký.</p>
+            <div id="cancellationOrderList" class="cancellation-order-list"></div>
+            <div class="form-group"><label>Lý do hủy <span class="required">*</span></label>
+                <select id="cancellationReason" class="context-input" onchange="toggleCancellationNote()">
+                    <option value="">Chọn lý do</option>
+                    <option value="Nhập sai đơn">Nhập sai đơn</option>
+                    <option value="Khách đổi ý">Khách đổi ý</option>
+                    <option value="Lỗi thanh toán">Lỗi thanh toán</option>
+                    <option value="Khác">Khác</option>
+                </select>
+            </div>
+            <div class="form-group" id="cancellationNoteGroup"><label>Ghi chú <span id="cancellationNoteRequired" class="required" hidden>*</span></label><textarea id="cancellationNote" rows="2" placeholder="Ghi chú thêm nếu cần"></textarea></div>
+            <div class="form-group"><label>PIN quản lý <span class="required">*</span></label><input id="cancellationPin" type="password" inputmode="numeric" autocomplete="off" placeholder="Nhập PIN để xác nhận" /></div>
+            <div class="modal-actions"><button class="btn-secondary" onclick="closeCancellationModal()">Quay lại</button><button id="confirmCancellationBtn" class="btn-danger" onclick="submitCancellation()">Xác nhận hủy</button></div>
+        </div>
+    </div>
+
+    <div id="shiftReportModal" class="modal-overlay">
+        <div class="modal-card operational-modal">
+            <div class="modal-heading"><div><span class="eyebrow">ĐỐI SOÁT CA</span><h2>Đã chốt ca</h2></div><button class="icon-close" onclick="closeOperationalModal('shiftReportModal')" aria-label="Đóng">×</button></div>
+            <div id="shiftReportBody" class="shift-report"></div>
+            <div class="modal-actions"><button class="btn-primary" onclick="closeOperationalModal('shiftReportModal')">Hoàn tất</button></div>
         </div>
     </div>
 
